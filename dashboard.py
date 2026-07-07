@@ -37,27 +37,19 @@ UPDATE_URL = "https://raw.githubusercontent.com/hugu752/dashboard-update/main/up
 MCP_SSE_URL = "http://127.0.0.1:3000/sse"
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard_state.json")
 
-# 新浪期货品种代码映射 (产品代码 -> 新浪主力合约代码)
-SINA_SYMBOL_MAP = {
-    # 上期所 SHFE
-    "rb": "RB0", "ag": "AG0", "au": "AU0", "cu": "CU0", "al": "AL0",
-    "zn": "ZN0", "ni": "NI0", "ru": "RU0", "fu": "FU0", "bu": "BU0",
-    "hc": "HC0", "ss": "SS0",
-    # 郑商所 CZCE
-    "FG": "FG0", "SA": "SA0", "SR": "SR0", "CF": "CF0", "TA": "TA0",
-    "MA": "MA0", "OI": "OI0", "RM": "RM0", "AP": "AP0", "AP0": "AP0",
-    "SF": "SF0", "SM": "SM0", "UR": "UR0", "PK": "PK0", "PF": "PF0",
-    "CJ": "CJ0", "CY": "CY0", "JM": "JM0", "J": "J0", "I": "I00",
-    # 大商所 DCE
-    "m": "M0", "y": "Y0", "a": "A0", "p": "P0", "c": "C00",
-    "cs": "CS0", "jd": "JD0", "lh": "LH0", "l": "L00", "v": "V00",
-    "pp": "PP0", "eg": "EG0", "eb": "EB0", "pg": "PG0",
-    # 中金所 CFFEX
-    "IF": "IF0", "IC": "IC0", "IH": "IH0", "IM": "IM0",
-    "T": "T00", "TF": "TF0", "TS": "TS0",
-    # 广期所 GFEX
-    "si": "SI0", "lc": "LC0",
-}
+# ============================================================================
+# 天勤量化 (tqsdk) 数据源
+# ============================================================================
+
+def _to_tq_symbol(instrument_id, exchange):
+    """将 exchange + instrument_id 转为天勤代码, 如 CZCE.FG2609"""
+    iid = instrument_id
+    if exchange == "CZCE":
+        import re as _re
+        m = _re.match(r"^([A-Za-z]+)(\d{3})$", iid)
+        if m:
+            iid = f"{m.group(1)}2{m.group(2)}"
+    return f"{exchange}.{iid}"
 
 # 交易所夜盘时间段 (开始小时, 结束小时) - 用于判断交易时间
 # 日盘: 9:00-11:30, 13:30-15:00
@@ -137,218 +129,200 @@ def get_next_open_time(now=None):
         return "明天09:00"
 
 
-def instrument_to_sina_symbol(instrument_id, exchange):
-    """将合约代码转换为新浪主力合约代码"""
-    # 提取产品代码 (去掉月份数字)
-    product = ""
-    for ch in instrument_id:
-        if ch.isdigit():
-            break
-        product += ch
 
-    # 先查精确匹配
-    sina_sym = SINA_SYMBOL_MAP.get(product)
-    if sina_sym:
-        return sina_sym
+# ============================================================================
+# 天勤量化 (tqsdk) 数据获取
+# ============================================================================
 
-    # 尝试大写/小写
-    sina_sym = SINA_SYMBOL_MAP.get(product.upper())
-    if sina_sym:
-        return sina_sym
-    sina_sym = SINA_SYMBOL_MAP.get(product.lower())
-    if sina_sym:
-        return sina_sym
-
-    return None
-
-
-def fetch_sina_quotes(sina_symbols):
-    """从新浪获取实时行情, 返回 {symbol: {price, open, high, low, prev_settle, volume, oi, ...}}"""
-    if not sina_symbols:
-        return {}
+def _get_tq_api():
+    """获取或创建天勤API实例 (缓存在session_state中)"""
     try:
-        symbols_str = ",".join([f"nf_{s}" for s in sina_symbols])
-        url = f"https://hq.sinajs.cn/list={symbols_str}"
-        headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
-        resp = requests.get(url, headers=headers, timeout=8)
-        resp.raise_for_status()
+        from tqsdk import TqApi, TqAuth
+    except ImportError:
+        return None, "tqsdk 未安装, 请运行: pip install tqsdk"
 
-        result = {}
-        for line in resp.text.strip().split("\n"):
-            if "=" not in line:
-                continue
-            name = line.split("=")[0].replace("var hq_str_nf_", "")
-            val = line.split('="')[1].rstrip('";')
-            if not val:
-                continue
-            fields = val.split(",")
-            if len(fields) < 15:
-                continue
-            try:
-                result[name] = {
-                    "name": fields[0],
-                    "time": fields[1],
-                    "open": float(fields[2]) if fields[2] else 0,
-                    "high": float(fields[3]) if fields[3] else 0,
-                    "low": float(fields[4]) if fields[4] else 0,
-                    "price": float(fields[8]) if fields[8] else 0,
-                    "bid": float(fields[6]) if fields[6] else 0,
-                    "ask": float(fields[7]) if fields[7] else 0,
-                    "prev_settle": float(fields[9]) if fields[9] else 0,
-                    "settle": float(fields[10]) if fields[10] else 0,
-                    "volume": int(float(fields[14])) if fields[14] else 0,
-                    "oi": int(float(fields[13])) if fields[13] else 0,
-                    "date": fields[17] if len(fields) > 17 else "",
-                }
-            except (ValueError, IndexError):
-                continue
-        return result
-    except Exception:
-        return {}
+    if "_tq_api" in st.session_state and st.session_state._tq_api is not None:
+        api = st.session_state._tq_api
+        try:
+            if hasattr(api, '_connection') and api._connection is not None:
+                return api, None
+        except Exception:
+            pass
+        try:
+            api.close()
+        except Exception:
+            pass
+        st.session_state._tq_api = None
 
+    tq_user = st.session_state.get("tq_user", "")
+    tq_pass = st.session_state.get("tq_pass", "")
+    if not tq_user or not tq_pass:
+        return None, "NEED_AUTH"
 
-def fetch_sina_klines(sina_symbol, style="M1", count=120):
-    """从新浪获取K线数据, 返回 list of candles"""
     try:
-        headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
-
-        if style == "D1":
-            url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20r=/InnerFuturesNewService.getDailyKLine?symbol={sina_symbol}"
-            resp = requests.get(url, headers=headers, timeout=10)
-            m = re.search(r'\(\[(.*)\]\)', resp.text, re.DOTALL)
-            if not m:
-                return []
-            items = json.loads("[" + m.group(1) + "]")
-            candles = []
-            for it in items:
-                candles.append({
-                    "time": it.get("d", ""),
-                    "open": float(it.get("o", 0)),
-                    "high": float(it.get("h", 0)),
-                    "low": float(it.get("l", 0)),
-                    "close": float(it.get("c", 0)),
-                    "volume": int(float(it.get("v", 0))),
-                })
-            return candles[-count:] if count else candles
-
-        elif style == "M1":
-            url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20r=/InnerFuturesNewService.getMinLine?symbol={sina_symbol}"
-            resp = requests.get(url, headers=headers, timeout=10)
-            m = re.search(r'\(\[(.*)\]\)', resp.text, re.DOTALL)
-            if not m:
-                return []
-            items = json.loads("[" + m.group(1) + "]")
-            candles = []
-            today = datetime.now().strftime("%Y-%m-%d")
-            for it in items:
-                if isinstance(it, list) and len(it) >= 4:
-                    candles.append({
-                        "time": f"{today} {it[0]}:00" if len(it[0]) <= 5 else f"{today} {it[0]}",
-                        "open": float(it[1]) if it[1] else 0,
-                        "high": float(it[1]) if it[1] else 0,  # 分钟线没有OHLC, 用close近似
-                        "low": float(it[1]) if it[1] else 0,
-                        "close": float(it[1]) if it[1] else 0,
-                        "volume": int(float(it[3])) if len(it) > 3 and it[3] else 0,
-                    })
-            return candles[-count:] if count else candles
-
-        else:  # M5, M15 等
-            type_map = {"M5": "5", "M15": "15", "M30": "30", "M60": "60"}
-            type_val = type_map.get(style, "5")
-            url = f"https://stock2.finance.sina.com.cn/futures/api/jsonp.php/var%20r=/InnerFuturesNewService.getFewMinLine?symbol={sina_symbol}&type={type_val}"
-            resp = requests.get(url, headers=headers, timeout=10)
-            m = re.search(r'\(\[(.*)\]\)', resp.text, re.DOTALL)
-            if not m:
-                return []
-            items = json.loads("[" + m.group(1) + "]")
-            candles = []
-            for it in items:
-                if isinstance(it, dict):
-                    candles.append({
-                        "time": it.get("d", ""),
-                        "open": float(it.get("o", 0)),
-                        "high": float(it.get("h", 0)),
-                        "low": float(it.get("l", 0)),
-                        "close": float(it.get("c", 0)),
-                        "volume": int(float(it.get("v", 0))),
-                    })
-            return candles[-count:] if count else candles
-
-    except Exception:
-        return []
+        api = TqApi(auth=TqAuth(tq_user, tq_pass))
+        st.session_state._tq_api = api
+        return api, None
+    except Exception as e:
+        err = str(e)
+        if "auth" in err.lower() or "password" in err.lower():
+            return None, "AUTH_FAILED"
+        return None, f"天勤连接失败: {err}"
 
 
-def fetch_data_from_sina(instruments):
-    """从新浪获取所有合约数据, 返回格式与 one_shot_fetch 兼容的 data dict"""
+def fetch_data_from_tq(instruments):
+    """从天勤量化获取所有合约数据, 返回格式与 one_shot_fetch 兼容"""
     if not instruments:
         return None
 
-    # 建立产品代码 -> 新浪代码的映射
-    sina_map = {}  # {sina_symbol: [list of instruments using it]}
-    for inst in instruments:
-        sina_sym = instrument_to_sina_symbol(inst["instrument_id"], inst["exchange"])
-        if sina_sym:
-            if sina_sym not in sina_map:
-                sina_map[sina_sym] = []
-            sina_map[sina_sym].append(inst)
-
-    if not sina_map:
+    api, err = _get_tq_api()
+    if err:
         return None
 
-    # 批量获取行情
-    quotes = fetch_sina_quotes(list(sina_map.keys()))
-    if not quotes:
-        return None
-
-    # 并行获取K线
-    data = {}
-    kline_cache = {}  # {sina_symbol: {style: candles}}
-
-    def fetch_klines_for_sina(sina_sym):
-        result = {}
-        for style, cnt in [("M1", 120), ("M5", 60), ("D1", 30)]:
-            result[style] = fetch_sina_klines(sina_sym, style, cnt)
-        return sina_sym, result
-
-    with ThreadPoolExecutor(max_workers=4) as pool:
-        futures = {pool.submit(fetch_klines_for_sina, sym): sym for sym in sina_map}
-        for f in as_completed(futures):
-            try:
-                sym, klines = f.result(timeout=15)
-                kline_cache[sym] = klines
-            except Exception:
-                pass
-
-    # 组装数据
-    for sina_sym, insts in sina_map.items():
-        q = quotes.get(sina_sym, {})
-        klines = kline_cache.get(sina_sym, {})
-        for inst in insts:
+    try:
+        # 订阅所有合约的行情和K线
+        tq_subs = {}
+        for inst in instruments:
             iid = inst["instrument_id"]
-            # 构造tick数据
+            ex = inst["exchange"]
+            sym = _to_tq_symbol(iid, ex)
+            tq_subs[iid] = {
+                "sym": sym,
+                "quote": api.get_quote(sym),
+                "k1m": api.get_kline_serial(sym, 60, data_length=120),
+                "k5m": api.get_kline_serial(sym, 300, data_length=60),
+                "k1d": api.get_kline_serial(sym, 86400, data_length=30),
+            }
+
+        api.wait_update(deadline=time.time() + 10)
+
+        # 提取数据
+        data = {}
+        for inst in instruments:
+            iid = inst["instrument_id"]
+            sub = tq_subs.get(iid)
+            if not sub:
+                continue
+
+            q = sub["quote"]
+            import math as _math
+            def _safe(v):
+                if v is None: return 0
+                try:
+                    fv = float(v)
+                    return 0 if _math.isnan(fv) else fv
+                except: return 0
+
             tick = {
                 "instrument_id": iid,
-                "last_price": q.get("price", 0),
-                "open": q.get("open", 0),
-                "high": q.get("high", 0),
-                "low": q.get("low", 0),
-                "prev_settlement": q.get("prev_settle", 0),
-                "volume": q.get("volume", 0),
-                "open_interest": q.get("oi", 0),
-                "bid_price1": q.get("bid", 0),
-                "ask_price1": q.get("ask", 0),
-                "datetime": q.get("date", "") + " " + q.get("time", ""),
+                "last_price": _safe(q.last_price),
+                "open": _safe(q.open),
+                "high": _safe(q.highest),
+                "low": _safe(q.lowest),
+                "high_price": _safe(q.highest),
+                "low_price": _safe(q.lowest),
+                "prev_settlement": _safe(q.pre_settlement),
+                "pre_settlement_price": _safe(q.pre_settlement),
+                "volume": int(_safe(q.volume)),
+                "open_interest": int(_safe(q.open_interest)),
+                "bid_price1": _safe(q.bid_price1),
+                "ask_price1": _safe(q.ask_price1),
+                "upper_limit": _safe(q.upper_limit),
+                "lower_limit": _safe(q.lower_limit),
+                "datetime": str(q.datetime) if q.datetime else "",
             }
+
+            def _klines_to_list(kdf):
+                result = []
+                try:
+                    from datetime import datetime as _dt
+                    for _, row in kdf.iterrows():
+                        t = row.get("datetime", 0)
+                        if isinstance(t, (int, float)) and not _math.isnan(t) and t > 0:
+                            try:
+                                ts = t / 1e9 if t > 1e15 else t
+                                time_str = _dt.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+                            except:
+                                time_str = str(t)
+                        else:
+                            continue
+                        o = _safe(row.get("open", 0))
+                        h = _safe(row.get("high", 0))
+                        l = _safe(row.get("low", 0))
+                        c = _safe(row.get("close", 0))
+                        if o == 0 and h == 0:
+                            continue
+                        result.append({
+                            "time": time_str,
+                            "open": o, "high": h, "low": l, "close": c,
+                            "volume": int(_safe(row.get("volume", 0))),
+                            "open_interest": int(_safe(row.get("close_oi", 0))),
+                        })
+                except Exception:
+                    pass
+                return result
+
             data[iid] = {
                 "inst": inst,
                 "tick": tick,
-                "candles_1m": klines.get("M1", []),
-                "candles_5m": klines.get("M5", []),
-                "candles_1d": klines.get("D1", []),
-                "sina_symbol": sina_sym,
+                "candles_1m": _klines_to_list(sub["k1m"]),
+                "candles_5m": _klines_to_list(sub["k5m"]),
+                "candles_1d": _klines_to_list(sub["k1d"]),
             }
 
-    return data if data else None
+        return data if data else None
+
+    except Exception as e:
+        print(f"[TQ] fetch_data_from_tq error: {e}")
+        return None
+
+
+def tq_realtime(instruments, cache_sec=1):
+    """天勤实时行情"""
+    now = time.time()
+    if "_tq_rt_cache" not in st.session_state:
+        st.session_state._tq_rt_cache = {"ts": 0, "data": {}}
+    cache = st.session_state._tq_rt_cache
+    if now - cache["ts"] < cache_sec and cache["data"]:
+        return cache["data"]
+
+    api, err = _get_tq_api()
+    if err:
+        return cache["data"]
+
+    try:
+        result = {}
+        quotes = {}
+        for inst in instruments:
+            sym = _to_tq_symbol(inst["instrument_id"], inst["exchange"])
+            quotes[inst["instrument_id"]] = api.get_quote(sym)
+
+        api.wait_update(deadline=time.time() + 5)
+
+        import math as _math
+        for inst in instruments:
+            iid = inst["instrument_id"]
+            q = quotes.get(iid)
+            if q:
+                lp = float(q.last_price) if q.last_price == q.last_price else 0
+                if lp > 0:
+                    result[iid] = {
+                        "last_price": lp,
+                        "open": float(q.open) if q.open == q.open else 0,
+                        "high": float(q.highest) if q.highest == q.highest else 0,
+                        "low": float(q.lowest) if q.lowest == q.lowest else 0,
+                        "bid": float(q.bid_price1) if q.bid_price1 == q.bid_price1 else 0,
+                        "ask": float(q.ask_price1) if q.ask_price1 == q.ask_price1 else 0,
+                        "volume": int(q.volume) if q.volume == q.volume else 0,
+                        "hold": int(q.open_interest) if q.open_interest == q.open_interest else 0,
+                        "name": getattr(q, "instrument_name", ""),
+                    }
+        cache["ts"] = now
+        cache["data"] = result
+        return result
+    except Exception:
+        return cache["data"]
+
 
 
 def save_state():
@@ -366,6 +340,8 @@ def save_state():
             "trade_volume": st.session_state.get("trade_volume", 1),
             "reversal_threshold": st.session_state.get("reversal_threshold", 30),
             "update_url": st.session_state.get("update_url", ""),
+            "tq_user": st.session_state.get("tq_user", ""),
+            "tq_pass": st.session_state.get("tq_pass", ""),
         }
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
@@ -1101,73 +1077,8 @@ def check_positions_sl_tp(data, instruments, reversal_threshold=30, timeframe="1
 
 
 # ============================================================================
-# 新浪实时行情 (低延迟，补充MCP)
+# 天勤实时行情 (复用上面的 tq_realtime 函数)
 # ============================================================================
-
-_SINA_SESSION = requests.Session()
-_SINA_SESSION.headers.update({"Referer": "https://finance.sina.com.cn"})
-_sina_cache = {"ts": 0, "data": {}}
-
-
-def _to_sina_code(exchange, instrument_id):
-    """将 exchange+instrument_id 转为新浪代码, 如 nf_AG2609"""
-    iid = instrument_id
-    # CZCE 3位月份 → 4位 (FG609 → FG2609)
-    if exchange == "CZCE":
-        import re as _re
-        m = _re.match(r"^([A-Za-z]+)(\d{3})$", iid)
-        if m:
-            iid = f"{m.group(1)}2{m.group(2)}"
-    return f"nf_{iid}"
-
-
-def sina_realtime(instruments, cache_sec=1):
-    """批量获取新浪期货实时行情, 返回 {instrument_id: {last_price, open, high, low, bid, ask, volume, hold, date}}"""
-    now = time.time()
-    if now - _sina_cache["ts"] < cache_sec:
-        return _sina_cache["data"]
-    codes = []
-    code_map = {}
-    for inst in instruments:
-        sc = _to_sina_code(inst["exchange"], inst["instrument_id"])
-        codes.append(sc)
-        code_map[sc] = inst["instrument_id"]
-    if not codes:
-        return {}
-    try:
-        url = f"https://hq.sinajs.cn/list={','.join(codes)}"
-        r = _SINA_SESSION.get(url, timeout=3)
-        result = {}
-        for line in r.text.strip().split("\n"):
-            if "=" not in line or '"' not in line:
-                continue
-            sc = line.split("=")[0].split("_")[-1]
-            sc = "nf_" + sc
-            raw = line.split('"')[1]
-            if not raw:
-                continue
-            f = raw.split(",")
-            if len(f) < 15:
-                continue
-            iid = code_map.get(sc, "")
-            if iid:
-                result[iid] = {
-                    "last_price": float(f[8]) if f[8] else 0,
-                    "open": float(f[2]) if f[2] else 0,
-                    "high": float(f[3]) if f[3] else 0,
-                    "low": float(f[4]) if f[4] else 0,
-                    "bid": float(f[6]) if f[6] else 0,
-                    "ask": float(f[7]) if f[7] else 0,
-                    "volume": int(f[14]) if f[14] else 0,
-                    "hold": int(float(f[13])) if f[13] else 0,
-                    "date": f[17] if len(f) > 17 else "",
-                    "name": f[0],
-                }
-        _sina_cache["ts"] = now
-        _sina_cache["data"] = result
-        return result
-    except Exception:
-        return _sina_cache["data"]
 
 
 # ============================================================================
@@ -1378,6 +1289,8 @@ if "_init" not in st.session_state:
         st.session_state.trade_volume = saved.get("trade_volume", 1)
         st.session_state.reversal_threshold = saved.get("reversal_threshold", 30)
         st.session_state.update_url = saved.get("update_url", "")
+        st.session_state.tq_user = saved.get("tq_user", "")
+        st.session_state.tq_pass = saved.get("tq_pass", "")
     else:
         st.session_state.instruments = list(DEFAULT_INSTRUMENTS)
         st.session_state.positions = {}
@@ -1455,6 +1368,20 @@ with st.sidebar:
         for ex,pr in PRODUCT_REFERENCE.items():
             st.markdown(f"**{ex}**")
             st.markdown(" ".join([f"`{c}`{i[0]}" for c,i in pr.items()]))
+    st.markdown("---")
+    with st.expander("天勤量化账号", expanded=not st.session_state.get("tq_user")):
+        st.caption("免费注册: https://www.shinnytech.com/register")
+        _tq_u = st.text_input("天勤账号", value=st.session_state.get("tq_user", ""), key="tq_user_input")
+        _tq_p = st.text_input("天勤密码", value=st.session_state.get("tq_pass", ""), type="password", key="tq_pass_input")
+        if _tq_u != st.session_state.get("tq_user", "") or _tq_p != st.session_state.get("tq_pass", ""):
+            st.session_state.tq_user = _tq_u
+            st.session_state.tq_pass = _tq_p
+            save_state()
+        if st.session_state.get("tq_user"):
+            if "_tq_api" in st.session_state and st.session_state._tq_api is not None:
+                st.success("天勤已连接")
+            else:
+                st.caption("下次刷新时自动连接")
     st.markdown("---")
     st.markdown("## 自动交易")
     st.session_state.auto_trading = st.toggle("启用自动交易", value=False, key="at_toggle")
@@ -1580,16 +1507,21 @@ if st.session_state.get("auto_trading") and not st.session_state.connected:
                 st.session_state.start_time = datetime.now()
                 st.rerun()
             else:
-                st.warning("自动交易已启用，但 MCP 连接失败。行情数据使用新浪财经。")
+                st.warning("自动交易已启用，但 MCP 连接失败。行情数据使用天勤量化。")
     else:
-        st.info(f"自动交易已启用，当前休市中。行情数据使用新浪财经。下段交易时间: {_next_open}")
+        st.info(f"自动交易已启用，当前休市中。行情数据使用天勤量化。下段交易时间: {_next_open}")
 
 
 # ============================================================================
-# 数据获取 - 新浪为主, MCP 为补充
+# 数据获取 - 天勤为主, MCP 为补充
 # ============================================================================
 
-_data_source = "sina"  # 默认使用新浪
+_data_source = "tq"  # 默认使用天勤
+
+# 检查天勤是否已配置
+_tq_ready = bool(st.session_state.get("tq_user") and st.session_state.get("tq_pass"))
+if not _tq_ready:
+    st.warning("请先在侧边栏配置天勤量化账号 (免费注册: https://www.shinnytech.com/register)")
 
 if st.session_state.connected and st.session_state.instruments:
     # MCP 已连接: 尝试用 MCP 获取数据 (更精确的合约数据)
@@ -1598,30 +1530,31 @@ if st.session_state.connected and st.session_state.instruments:
         if mcp_data:
             st.session_state.data = mcp_data
             _data_source = "mcp"
-        else:
-            st.warning("MCP 数据获取失败，切换到新浪财经")
-            st.session_state.data = fetch_data_from_sina(st.session_state.instruments)
+        elif _tq_ready:
+            st.warning("MCP 数据获取失败，切换到天勤量化")
+            st.session_state.data = fetch_data_from_tq(st.session_state.instruments)
             if st.session_state.data:
-                _data_source = "sina"
+                _data_source = "tq"
             else:
                 st.error("数据获取全部失败")
+        else:
+            st.error("MCP 数据获取失败，请先配置天勤量化账号或使用MCP")
 elif st.session_state.instruments:
-    # MCP 未连接: 使用新浪数据
-    if _in_trading or True:  # 休市也显示数据 (最后的价格)
-        with st.spinner("获取数据中 (新浪)..."):
-            st.session_state.data = fetch_data_from_sina(st.session_state.instruments)
+    # MCP 未连接: 使用天勤数据
+    if _tq_ready:
+        with st.spinner("获取数据中 (天勤)..."):
+            st.session_state.data = fetch_data_from_tq(st.session_state.instruments)
             if not st.session_state.data:
-                st.warning("新浪数据获取失败")
+                st.warning("天勤数据获取失败，请检查账号和网络")
     else:
-        # 休市时降低刷新频率
-        st.session_state.data = fetch_data_from_sina(st.session_state.instruments)
+        st.session_state.data = None
 
 # 显示数据来源
 if st.session_state.data:
     if _data_source == "mcp":
         st.caption("📡 数据来源: MCP (无限易)")
     else:
-        st.caption("📡 数据来源: 新浪财经 (主力合约)")
+        st.caption("📡 数据来源: 天勤量化")
 
 # 获取资金和持仓 (仅 MCP 连接时)
 if st.session_state.connected:
@@ -1732,16 +1665,16 @@ if st.session_state.holdings_info:
 
 
 # ============================================================================
-# 价格卡片 (MCP + 新浪实时补充)
+# 价格卡片 (MCP + 天勤实时补充)
 # ============================================================================
 
 st.markdown("---")
 
-# 获取新浪实时行情作为补充
-sina_quotes = {}
+# 获取天勤实时行情作为补充
+tq_quotes = {}
 if st.session_state.instruments:
     try:
-        sina_quotes = sina_realtime(st.session_state.instruments, cache_sec=1)
+        tq_quotes = tq_realtime(st.session_state.instruments, cache_sec=1)
     except Exception:
         pass
 
@@ -1757,9 +1690,9 @@ for gn, gi in groups.items():
         iid = inst["instrument_id"]
         d = st.session_state.data.get(iid, {})
         tick = d.get("tick")
-        sina = sina_quotes.get(iid, {})
+        tq = tq_quotes.get(iid, {})
         with cols[i]:
-            # 优先MCP tick，无数据时用新浪补充
+            # 优先MCP tick，无数据时用天勤补充
             if tick and "error" not in tick and tick.get("last_price", 0) > 0:
                 p = tick.get("last_price",0); ps = tick.get("pre_settlement_price",0)
                 ch = p-ps if ps else 0; cp = (ch/ps*100) if ps else 0
@@ -1771,15 +1704,15 @@ for gn, gi in groups.items():
                 a,b=st.columns(2)
                 with a: st.caption(f"高{tick.get('high_price',0):.0f}/低{tick.get('low_price',0):.0f}")
                 with b: st.caption(f"量{v:,}/仓{oi:,.0f}")
-            elif sina and sina.get("last_price", 0) > 0:
-                p = sina["last_price"]
+            elif tq and tq.get("last_price", 0) > 0:
+                p = tq["last_price"]
                 prev = st.session_state.prev_ticks.get(iid, p)
                 st.session_state.prev_ticks[iid] = p
                 fl = "🔺" if p>prev else ("🔻" if p<prev else "")
-                st.metric(label=f"{inst['label']} {fl}📡", value=f"{p:.0f}", delta="新浪")
+                st.metric(label=f"{inst['label']} {fl}📡", value=f"{p:.0f}", delta="天勤")
                 a,b=st.columns(2)
-                with a: st.caption(f"高{sina.get('high',0):.0f}/低{sina.get('low',0):.0f}")
-                with b: st.caption(f"量{sina.get('volume',0):,}/仓{sina.get('hold',0):,}")
+                with a: st.caption(f"高{tq.get('high',0):.0f}/低{tq.get('low',0):.0f}")
+                with b: st.caption(f"量{tq.get('volume',0):,}/仓{tq.get('hold',0):,}")
             else:
                 st.metric(label=inst["label"], value="--", delta="无数据")
 
