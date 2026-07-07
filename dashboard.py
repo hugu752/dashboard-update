@@ -1718,6 +1718,57 @@ for gn, gi in groups.items():
 
 
 # ============================================================================
+# K线走势图 (每个品种)
+# ============================================================================
+
+st.markdown("---")
+st.markdown("#### K线走势")
+_kl_tf = st.segmented_control("K线周期", ["1m", "5m", "1d"], default="1m", key="kl_tf",
+    format_func=lambda x: {"1m": "1分钟", "5m": "5分钟", "1d": "日线"}[x])
+_kl_map = {"1m": "candles_1m", "5m": "candles_5m", "1d": "candles_1d"}
+_kl_key = _kl_map.get(_kl_tf, "candles_1m")
+_kl_count = {"1m": 60, "5m": 40, "1d": 30}.get(_kl_tf, 60)
+
+for gn, gi in groups.items():
+    st.markdown(f"**{gn}**")
+    kl_cols = st.columns(min(len(gi), 3))
+    for ki, inst in enumerate(gi):
+        iid = inst["instrument_id"]
+        candles = st.session_state.data.get(iid, {}).get(_kl_key, [])
+        with kl_cols[ki % len(kl_cols)]:
+            if not candles:
+                st.info(f"{inst['label']} 无K线数据")
+                continue
+            rc = candles[-_kl_count:]
+            fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                row_heights=[0.72, 0.28], vertical_spacing=0.04)
+            fig.add_trace(go.Candlestick(
+                x=[c.get("time", "") for c in rc],
+                open=[c.get("open", 0) for c in rc],
+                high=[c.get("high", 0) for c in rc],
+                low=[c.get("low", 0) for c in rc],
+                close=[c.get("close", 0) for c in rc],
+                increasing_line_color="#ef4444", decreasing_line_color="#22c55e",
+                name="K线",
+            ), row=1, col=1)
+            vc = ["#ef4444" if c.get("close", 0) >= c.get("open", 0) else "#22c55e" for c in rc]
+            fig.add_trace(go.Bar(
+                x=[c.get("time", "") for c in rc],
+                y=[c.get("volume", 0) for c in rc],
+                marker_color=vc, name="成交量", showlegend=False,
+            ), row=2, col=1)
+            fig.update_layout(
+                height=280, margin=dict(l=8, r=8, t=8, b=8),
+                template="plotly_dark", showlegend=False,
+                xaxis_rangeslider_visible=False,
+                xaxis2_rangeslider_visible=False,
+            )
+            fig.update_xaxes(type="category", nticks=6, row=1, col=1)
+            fig.update_xaxes(type="category", nticks=6, row=2, col=1)
+            st.plotly_chart(fig, use_container_width=True)
+
+
+# ============================================================================
 # 持仓监控
 # ============================================================================
 
