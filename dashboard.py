@@ -143,9 +143,14 @@ def _get_tq_api():
 
     if "_tq_api" in st.session_state and st.session_state._tq_api is not None:
         api = st.session_state._tq_api
+        # 检查API连接是否仍然存活
         try:
-            if hasattr(api, '_connection') and api._connection is not None:
-                return api, None
+            # tqsdk的API在关闭后_is_alive会变为False
+            if hasattr(api, '_is_alive') and not api._is_alive:
+                raise RuntimeError("API connection closed")
+            # 尝试访问内部状态验证连接
+            _ = api._account
+            return api, None
         except Exception:
             pass
         try:
@@ -153,6 +158,7 @@ def _get_tq_api():
         except Exception:
             pass
         st.session_state._tq_api = None
+        st.session_state._tq_subs = None  # 清除订阅缓存
 
     tq_user = st.session_state.get("tq_user", "")
     tq_pass = st.session_state.get("tq_pass", "")
@@ -162,12 +168,43 @@ def _get_tq_api():
     try:
         api = TqApi(auth=TqAuth(tq_user, tq_pass))
         st.session_state._tq_api = api
+        st.session_state._tq_subs = None  # 新API需要重新订阅
         return api, None
     except Exception as e:
         err = str(e)
         if "auth" in err.lower() or "password" in err.lower():
             return None, "AUTH_FAILED"
         return None, f"天勤连接失败: {err}"
+
+
+def _get_tq_subscriptions(api, instruments):
+    """获取或创建天勤订阅 (缓存在session_state中, 避免重复订阅)"""
+    if "_tq_subs" in st.session_state and st.session_state._tq_subs is not None:
+        subs = st.session_state._tq_subs
+        # 检查是否已订阅所有需要的合约
+        cached_iids = set(subs.keys())
+        needed_iids = {inst["instrument_id"] for inst in instruments}
+        if needed_iids <= cached_iids:
+            return subs
+
+    # 需要新建订阅
+    subs = {}
+    for inst in instruments:
+        iid = inst["instrument_id"]
+        ex = inst["exchange"]
+        sym = _to_tq_symbol(iid, ex)
+        subs[iid] = {
+            "sym": sym,
+            "quote": api.get_quote(sym),
+            "k1m": api.get_kline_serial(sym, 60, data_length=120),
+            "k5m": api.get_kline_serial(sym, 300, data_length=60),
+            "k1d": api.get_kline_serial(sym, 86400, data_length=30),
+        }
+
+    # 首次订阅后等待数据到达
+    api.wait_update(deadline=time.time() + 15)
+    st.session_state._tq_subs = subs
+    return subs
 
 
 def fetch_data_from_tq(instruments):
@@ -180,21 +217,11 @@ def fetch_data_from_tq(instruments):
         return None
 
     try:
-        # 订阅所有合约的行情和K线
-        tq_subs = {}
-        for inst in instruments:
-            iid = inst["instrument_id"]
-            ex = inst["exchange"]
-            sym = _to_tq_symbol(iid, ex)
-            tq_subs[iid] = {
-                "sym": sym,
-                "quote": api.get_quote(sym),
-                "k1m": api.get_kline_serial(sym, 60, data_length=120),
-                "k5m": api.get_kline_serial(sym, 300, data_length=60),
-                "k1d": api.get_kline_serial(sym, 86400, data_length=30),
-            }
+        # 使用缓存的订阅 (避免每次重新订阅)
+        tq_subs = _get_tq_subscriptions(api, instruments)
 
-        api.wait_update(deadline=time.time() + 10)
+        # 后续刷新只需短暂等待更新
+        api.wait_update(deadline=time.time() + 3)
 
         # 提取数据
         data = {}
@@ -291,19 +318,19 @@ def tq_realtime(instruments, cache_sec=1):
         return cache["data"]
 
     try:
-        result = {}
-        quotes = {}
-        for inst in instruments:
-            sym = _to_tq_symbol(inst["instrument_id"], inst["exchange"])
-            quotes[inst["instrument_id"]] = api.get_quote(sym)
+        # 复用已缓存的订阅, 避免重复 get_quote
+        subs = _get_tq_subscriptions(api, instruments)
 
-        api.wait_update(deadline=time.time() + 5)
+        # 短暂等待最新数据
+        api.wait_update(deadline=time.time() + 2)
 
         import math as _math
+        result = {}
         for inst in instruments:
             iid = inst["instrument_id"]
-            q = quotes.get(iid)
-            if q:
+            sub = subs.get(iid)
+            if sub:
+                q = sub["quote"]
                 lp = float(q.last_price) if q.last_price == q.last_price else 0
                 if lp > 0:
                     result[iid] = {
@@ -1670,9 +1697,9 @@ if st.session_state.holdings_info:
 
 st.markdown("---")
 
-# 获取天勤实时行情作为补充
+# 获取天勤实时行情作为补充 (仅在MCP数据源时, 避免重复wait_update)
 tq_quotes = {}
-if st.session_state.instruments:
+if st.session_state.instruments and _data_source == "mcp":
     try:
         tq_quotes = tq_realtime(st.session_state.instruments, cache_sec=1)
     except Exception:
