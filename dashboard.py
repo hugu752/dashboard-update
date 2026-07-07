@@ -134,6 +134,18 @@ def get_next_open_time(now=None):
 # 天勤量化 (tqsdk) 数据获取
 # ============================================================================
 
+# 注册退出时清理天勤API连接
+import atexit as _atexit
+def _cleanup_tq():
+    try:
+        import streamlit as _st
+        api = getattr(_st.session_state, '_tq_api', None)
+        if api is not None:
+            api.close()
+    except Exception:
+        pass
+_atexit.register(_cleanup_tq)
+
 def _get_tq_api():
     """获取或创建天勤API实例 (缓存在session_state中)"""
     try:
@@ -1559,8 +1571,9 @@ if st.session_state.connected and st.session_state.instruments:
             _data_source = "mcp"
         elif _tq_ready:
             st.warning("MCP 数据获取失败，切换到天勤量化")
-            st.session_state.data = fetch_data_from_tq(st.session_state.instruments)
-            if st.session_state.data:
+            _tq_data = fetch_data_from_tq(st.session_state.instruments)
+            if _tq_data:
+                st.session_state.data = _tq_data
                 _data_source = "tq"
             else:
                 st.error("数据获取全部失败")
@@ -1570,11 +1583,13 @@ elif st.session_state.instruments:
     # MCP 未连接: 使用天勤数据
     if _tq_ready:
         with st.spinner("获取数据中 (天勤)..."):
-            st.session_state.data = fetch_data_from_tq(st.session_state.instruments)
-            if not st.session_state.data:
+            _tq_data = fetch_data_from_tq(st.session_state.instruments)
+            if _tq_data:
+                st.session_state.data = _tq_data
+            else:
                 st.warning("天勤数据获取失败，请检查账号和网络")
     else:
-        st.session_state.data = None
+        st.session_state.data = {}
 
 # 显示数据来源
 if st.session_state.data:
@@ -1672,7 +1687,8 @@ if st.session_state.holdings_info:
             pnl_color = "green" if pnl >= 0 else "red"
 
             # 获取当前价格
-            tick_data = st.session_state.data.get(inst_id, {}).get("tick", {})
+            _sd = st.session_state.data or {}
+            tick_data = _sd.get(inst_id, {}).get("tick", {})
             cp = tick_data.get("last_price", 0) if isinstance(tick_data, dict) else 0
 
             st.markdown(f"**{inst_id}** &nbsp; {dir_label} {vol}手")
@@ -1710,6 +1726,10 @@ for inst in st.session_state.instruments:
     g = inst["group"]
     if g not in groups: groups[g] = []
     groups[g].append(inst)
+
+# 确保 data 不为 None
+if st.session_state.data is None:
+    st.session_state.data = {}
 
 for gn, gi in groups.items():
     cols = st.columns(len(gi))
@@ -2394,7 +2414,7 @@ if st.session_state.get("auto_trading") and st.session_state.connected and st.se
 # 止盈止损检查
 # ============================================================================
 
-if st.session_state.connected and st.session_state.positions:
+if st.session_state.connected and st.session_state.positions and st.session_state.data:
     rv_threshold = st.session_state.get("reversal_threshold", 30)
     sl_tp_results = check_positions_sl_tp(
         st.session_state.data, st.session_state.instruments, rv_threshold,
