@@ -195,7 +195,7 @@ def _get_tq_api():
 
     t = threading.Thread(target=_create_api, daemon=True)
     t.start()
-    t.join(timeout=20)  # 最多等20秒
+    t.join(timeout=40)  # 天勤连接通常需要18-30秒
 
     if t.is_alive():
         # 超时了, 线程还在跑但无法终止
