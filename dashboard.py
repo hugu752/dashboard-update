@@ -27,7 +27,7 @@ import streamlit as st
 # ============================================================================
 
 DASHBOARD_VERSION = "1.0.0"
-UPDATE_URL = ""  # 用户可在此填入更新服务器URL或本地/网络路径
+UPDATE_URL = "https://raw.githubusercontent.com/hugu752/dashboard-update/main/update.json"  # 用户可在此填入更新服务器URL或本地/网络路径
 
 
 # ============================================================================
