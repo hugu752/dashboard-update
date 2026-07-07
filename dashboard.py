@@ -156,37 +156,64 @@ def _get_tq_api():
     if "_tq_api" in st.session_state and st.session_state._tq_api is not None:
         api = st.session_state._tq_api
         # 检查API连接是否仍然存活
+        alive = True
         try:
-            # tqsdk的API在关闭后_is_alive会变为False
-            if hasattr(api, '_is_alive') and not api._is_alive:
-                raise RuntimeError("API connection closed")
-            # 尝试访问内部状态验证连接
-            _ = api._account
-            return api, None
+            if hasattr(api, '_is_alive'):
+                alive = api._is_alive
+            if alive:
+                # 再验证一下内部状态
+                try:
+                    _ = api._account
+                except Exception:
+                    alive = False
         except Exception:
-            pass
+            alive = False
+
+        if alive:
+            return api, None
+
+        # 连接已断开, 清理旧实例
         try:
             api.close()
         except Exception:
             pass
         st.session_state._tq_api = None
-        st.session_state._tq_subs = None  # 清除订阅缓存
+        st.session_state._tq_subs = None
 
     tq_user = st.session_state.get("tq_user", "")
     tq_pass = st.session_state.get("tq_pass", "")
     if not tq_user or not tq_pass:
         return None, "NEED_AUTH"
 
-    try:
-        api = TqApi(auth=TqAuth(tq_user, tq_pass))
-        st.session_state._tq_api = api
-        st.session_state._tq_subs = None  # 新API需要重新订阅
-        return api, None
-    except Exception as e:
-        err = str(e)
+    # 使用线程+超时创建API, 防止TqApi()卡死
+    _result = {"api": None, "err": None}
+    def _create_api():
+        try:
+            _result["api"] = TqApi(auth=TqAuth(tq_user, tq_pass))
+        except Exception as e:
+            _result["err"] = e
+
+    t = threading.Thread(target=_create_api, daemon=True)
+    t.start()
+    t.join(timeout=20)  # 最多等20秒
+
+    if t.is_alive():
+        # 超时了, 线程还在跑但无法终止
+        return None, "天勤连接超时(20秒), 请检查网络后重试"
+
+    if _result["err"]:
+        err = str(_result["err"])
         if "auth" in err.lower() or "password" in err.lower():
             return None, "AUTH_FAILED"
         return None, f"天勤连接失败: {err}"
+
+    api = _result["api"]
+    if api is None:
+        return None, "天勤连接失败: 未知错误"
+
+    st.session_state._tq_api = api
+    st.session_state._tq_subs = None  # 新API需要重新订阅
+    return api, None
 
 
 def _get_tq_subscriptions(api, instruments):
@@ -1587,7 +1614,16 @@ elif st.session_state.instruments:
             if _tq_data:
                 st.session_state.data = _tq_data
             else:
-                st.warning("天勤数据获取失败，请检查账号和网络")
+                # 显示具体错误原因
+                _api, _err = _get_tq_api()
+                if _err == "NEED_AUTH":
+                    st.warning("请先在侧边栏配置天勤量化账号")
+                elif _err == "AUTH_FAILED":
+                    st.error("天勤账号或密码错误，请在侧边栏重新输入")
+                elif _err:
+                    st.warning(f"天勤: {_err}")
+                else:
+                    st.warning("天勤数据获取失败，请检查网络")
     else:
         st.session_state.data = {}
 
