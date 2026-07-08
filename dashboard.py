@@ -979,7 +979,7 @@ def execute_auto_trades(data, instruments, threshold, sl_pct, tp_pct, volume, ti
             continue
 
         # 再检查实际账户持仓 (双重保险)
-        holding = send_trade("fetch_holding", {"instrument_id": iid})
+        holding = send_trade("fetch_holding", {"exchange": exchange, "instrument_id": iid})
         has_position = False
         if holding.get("ok") and holding.get("data"):
             hd = holding["data"]
@@ -1042,7 +1042,7 @@ def execute_auto_trades(data, instruments, threshold, sl_pct, tp_pct, volume, ti
         # 记录持仓目标价用于后续止盈止损检查
         st.session_state.positions[iid] = {
             "direction": direction, "entry_price": cp, "volume": volume,
-            "sl": sl_price, "tp": tp_price
+            "sl": sl_price, "tp": tp_price, "exchange": exchange
         }
 
         # 写日志到MCP
@@ -1130,6 +1130,12 @@ def check_positions_sl_tp(data, instruments, reversal_threshold=30, timeframe="1
         # === 触发平仓 ===
         inst = inst_map.get(iid, {})
         exchange = inst.get("exchange", "")
+        if not exchange:
+            # 合约已从监控列表删除但仍有持仓, 尝试从持仓数据恢复交易所
+            exchange = pos.get("exchange", "")
+        if not exchange:
+            print(f"[AUTO] 跳过平仓 {iid}: 无法确定交易所")
+            continue
         close_dir = "sell" if direction == "buy" else "buy"
 
         close_result = send_trade("submit_close", {
@@ -1433,11 +1439,16 @@ with st.sidebar:
         if not pc: st.warning("选品种")
         elif not mi: st.warning("输月份")
         else:
-            iid = f"{pc}{mi}"
-            if iid in {i["instrument_id"] for i in st.session_state.instruments}: st.warning("已存在")
+            # 校验月份位数
+            expected_digits = EXCHANGE_MONTH_DIGITS.get(ec, 4)
+            if len(mi) != expected_digits or not mi.isdigit():
+                st.warning(f"{ec} 月份需要{expected_digits}位数字 (如{'609' if expected_digits==3 else '2609'})")
             else:
-                st.session_state.instruments.append({"exchange":ec,"instrument_id":iid,"label":f"{pi[0]}{mi}","size":pi[1],"price_tick":pi[2],"group":pi[0]})
-                save_state(); st.rerun()
+                iid = f"{pc}{mi}"
+                if iid in {i["instrument_id"] for i in st.session_state.instruments}: st.warning("已存在")
+                else:
+                    st.session_state.instruments.append({"exchange":ec,"instrument_id":iid,"label":f"{pi[0]}{mi}","size":pi[1],"price_tick":pi[2],"group":pi[0]})
+                    save_state(); st.rerun()
     st.markdown("---")
     with st.expander("批量添加"):
         be2 = st.selectbox("交易所", el, key="be2"); bc2=be2.split(" ")[0]
@@ -1448,6 +1459,8 @@ with st.sidebar:
             bm = st.text_input("月份", placeholder="609" if bc2=="CZCE" else "2609", key="bm")
             if st.button("批量添加", key="bb"):
                 if not bm: st.warning("输月份")
+                elif len(bm) != EXCHANGE_MONTH_DIGITS.get(bc2, 4) or not bm.isdigit():
+                    st.warning(f"{bc2} 月份需要{EXCHANGE_MONTH_DIGITS.get(bc2, 4)}位数字")
                 else:
                     a=0
                     for d in bs:
