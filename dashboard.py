@@ -991,7 +991,7 @@ def execute_auto_trades(data, instruments, threshold, sl_pct, tp_pct, volume, ti
             # 实际有持仓但本地没追踪, 补充记录
             st.session_state.positions[iid] = {
                 "direction": direction, "entry_price": cp, "volume": volume,
-                "sl": 0, "tp": 0
+                "sl": 0, "tp": 0, "exchange": exchange
             }
             continue
 
@@ -2469,45 +2469,64 @@ with tab6:
 # 自动交易执行
 # ============================================================================
 
-if st.session_state.get("auto_trading") and st.session_state.connected and st.session_state.data:
-    threshold = st.session_state.get("signal_threshold", 50)
-    sl_pct = st.session_state.get("stop_loss_pct", 2.0)
-    tp_pct = st.session_state.get("take_profit_pct", 4.0)
-    tvol = st.session_state.get("trade_volume", 1)
-    trade_results = execute_auto_trades(
-        st.session_state.data, st.session_state.instruments,
-        threshold, sl_pct, tp_pct, tvol,
-        timeframe=st.session_state.get("auto_trade_timeframe", "1m")
-    )
-    if trade_results:
-        save_state()
-        st.markdown("---")
-        st.markdown("#### 自动交易执行")
-        for tr in trade_results:
-            icon = "🟢" if tr["direction"] == "buy" else "🔴"
-            if "失败" in tr["action"]:
-                st.error(f"{icon} {tr['time']} {tr['instrument_id']} {tr['action']}: {tr['message']}")
-            else:
-                st.success(f"{icon} {tr['time']} {tr['action']} {tr['instrument_id']} {tr['volume']}手 @ {tr['price']} | SL:{tr['stop_loss']} TP:{tr['take_profit']} | {tr['message']}")
+if st.session_state.get("auto_trading") and st.session_state.data:
+    # 自动交易: 数据来自天勤, 下单通过MCP
+    # 先确保MCP连接 (用于下单, 不用于数据)
+    if not st.session_state.connected:
+        try:
+            test_cap = send_trade("fetch_capital", {})
+            if test_cap.get("ok"):
+                st.session_state.connected = True
+        except Exception:
+            pass
+    if st.session_state.connected:
+        threshold = st.session_state.get("signal_threshold", 50)
+        sl_pct = st.session_state.get("stop_loss_pct", 2.0)
+        tp_pct = st.session_state.get("take_profit_pct", 4.0)
+        tvol = st.session_state.get("trade_volume", 1)
+        trade_results = execute_auto_trades(
+            st.session_state.data, st.session_state.instruments,
+            threshold, sl_pct, tp_pct, tvol,
+            timeframe=st.session_state.get("auto_trade_timeframe", "1m")
+        )
+        if trade_results:
+            save_state()
+            st.markdown("---")
+            st.markdown("#### 自动交易执行")
+            for tr in trade_results:
+                icon = "🟢" if tr["direction"] == "buy" else "🔴"
+                if "失败" in tr["action"]:
+                    st.error(f"{icon} {tr['time']} {tr['instrument_id']} {tr['action']}: {tr['message']}")
+                else:
+                    st.success(f"{icon} {tr['time']} {tr['action']} {tr['instrument_id']} {tr['volume']}手 @ {tr['price']} | SL:{tr['stop_loss']} TP:{tr['take_profit']} | {tr['message']}")
 
 
 # ============================================================================
 # 止盈止损检查
 # ============================================================================
 
-if st.session_state.connected and st.session_state.positions and st.session_state.data:
-    rv_threshold = st.session_state.get("reversal_threshold", 30)
-    sl_tp_results = check_positions_sl_tp(
-        st.session_state.data, st.session_state.instruments, rv_threshold,
-        timeframe=st.session_state.get("auto_trade_timeframe", "1m")
-    )
-    if sl_tp_results:
-        save_state()
-        st.markdown("---")
-        st.markdown("#### 止盈止损触发")
-        for tr in sl_tp_results:
-            icon = "🟢" if tr["direction"] == "buy" else "🔴"
-            st.warning(f"{icon} {tr['time']} {tr['action']} {tr['instrument_id']} {tr['volume']}手 @ {tr['price']} | {tr['message']}")
+if st.session_state.positions and st.session_state.data:
+    # 止盈止损: 数据来自天勤, 平仓通过MCP
+    if not st.session_state.connected:
+        try:
+            test_cap = send_trade("fetch_capital", {})
+            if test_cap.get("ok"):
+                st.session_state.connected = True
+        except Exception:
+            pass
+    if st.session_state.connected:
+        rv_threshold = st.session_state.get("reversal_threshold", 30)
+        sl_tp_results = check_positions_sl_tp(
+            st.session_state.data, st.session_state.instruments, rv_threshold,
+            timeframe=st.session_state.get("auto_trade_timeframe", "1m")
+        )
+        if sl_tp_results:
+            save_state()
+            st.markdown("---")
+            st.markdown("#### 止盈止损触发")
+            for tr in sl_tp_results:
+                icon = "🟢" if tr["direction"] == "buy" else "🔴"
+                st.warning(f"{icon} {tr['time']} {tr['action']} {tr['instrument_id']} {tr['volume']}手 @ {tr['price']} | {tr['message']}")
 
 
 # ============================================================================
