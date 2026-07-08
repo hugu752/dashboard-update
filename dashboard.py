@@ -26,7 +26,7 @@ import streamlit as st
 # 版本信息
 # ============================================================================
 
-DASHBOARD_VERSION = "1.0.2"
+DASHBOARD_VERSION = "1.0.3"
 UPDATE_URL = "https://raw.githubusercontent.com/hugu752/dashboard-update/main/update.json"  # 用户可在此填入更新服务器URL或本地/网络路径
 
 
@@ -1950,7 +1950,7 @@ if st.session_state.instruments:
     except Exception as e:
         _institutional_rank_error = str(e)
 
-tab1,tab2,tab3,tab4,tab5,tab7,tab6 = st.tabs(["订单流Delta","量价仓","主力价位","能量","信号","机构持仓","期权交易"])
+tab1,tab2,tab3,tab4,tab5,tab7,tab6,tab_bt = st.tabs(["订单流Delta","量价仓","主力价位","能量","信号","机构持仓","期权交易","回测"])
 
 with tab1:
     st.markdown("#### Delta分析")
@@ -2529,225 +2529,223 @@ if st.session_state.positions and st.session_state.data:
                 st.warning(f"{icon} {tr['time']} {tr['action']} {tr['instrument_id']} {tr['volume']}手 @ {tr['price']} | {tr['message']}")
 
 
-# ============================================================================
-# 回测模块
-# ============================================================================
 
-st.markdown("---")
-st.markdown("#### 策略回测")
+with tab_bt:
+    st.markdown("#### 策略回测")
 
-_bt_col1, _bt_col2, _bt_col3 = st.columns([2, 1, 1])
-with _bt_col1:
-    _bt_insts = st.session_state.instruments
-    if not _bt_insts:
-        st.info("请先添加监控品种")
-    _bt_labels = [f"{i['label']} ({i['exchange']}.{i['instrument_id']})" for i in _bt_insts]
-    _bt_sel = st.selectbox("回测品种", _bt_labels, key="bt_sel") if _bt_labels else None
-with _bt_col2:
-    _bt_tf = st.selectbox("K线周期", ["5m", "15m", "1h", "1d"], key="bt_tf",
-        format_func=lambda x: {"5m":"5分钟","15m":"15分钟","1h":"1小时","1d":"日线"}[x])
-with _bt_col3:
-    _bt_days = st.selectbox("回测天数", [30, 60, 90, 180], key="bt_days")
 
-_bt_p1, _bt_p2, _bt_p3, _bt_p4 = st.columns(4)
-with _bt_p1:
-    _bt_threshold = st.number_input("信号阈值", 20, 100, st.session_state.get("signal_threshold", 50), key="bt_thr")
-with _bt_p2:
-    _bt_sl = st.number_input("止损%", 0.5, 10.0, st.session_state.get("stop_loss_pct", 2.0), key="bt_sl")
-with _bt_p3:
-    _bt_tp = st.number_input("止盈%", 0.5, 20.0, st.session_state.get("take_profit_pct", 4.0), key="bt_tp")
-with _bt_p4:
-    _bt_vol = st.number_input("每手", 1, 100, st.session_state.get("trade_volume", 1), key="bt_vol")
+    _bt_col1, _bt_col2, _bt_col3 = st.columns([2, 1, 1])
+    with _bt_col1:
+        _bt_insts = st.session_state.instruments
+        if not _bt_insts:
+            st.info("请先添加监控品种")
+        _bt_labels = [f"{i['label']} ({i['exchange']}.{i['instrument_id']})" for i in _bt_insts]
+        _bt_sel = st.selectbox("回测品种", _bt_labels, key="bt_sel") if _bt_labels else None
+    with _bt_col2:
+        _bt_tf = st.selectbox("K线周期", ["5m", "15m", "1h", "1d"], key="bt_tf",
+            format_func=lambda x: {"5m":"5分钟","15m":"15分钟","1h":"1小时","1d":"日线"}[x])
+    with _bt_col3:
+        _bt_days = st.selectbox("回测天数", [30, 60, 90, 180], key="bt_days")
 
-if st.button("运行回测", type="primary", key="bt_run") and _bt_sel:
-    _bt_idx = _bt_labels.index(_bt_sel)
-    _bt_inst = _bt_insts[_bt_idx]
-    _bt_sym = _to_tq_symbol(_bt_inst["instrument_id"], _bt_inst["exchange"])
-    _bt_iid = _bt_inst["instrument_id"]
-    _bt_ex = _bt_inst["exchange"]
-    _bt_size = _bt_inst.get("size", 10)
+    _bt_p1, _bt_p2, _bt_p3, _bt_p4 = st.columns(4)
+    with _bt_p1:
+        _bt_threshold = st.number_input("信号阈值", 20, 100, st.session_state.get("signal_threshold", 50), key="bt_thr")
+    with _bt_p2:
+        _bt_sl = st.number_input("止损%", 0.5, 10.0, st.session_state.get("stop_loss_pct", 2.0), key="bt_sl")
+    with _bt_p3:
+        _bt_tp = st.number_input("止盈%", 0.5, 20.0, st.session_state.get("take_profit_pct", 4.0), key="bt_tp")
+    with _bt_p4:
+        _bt_vol = st.number_input("每手", 1, 100, st.session_state.get("trade_volume", 1), key="bt_vol")
 
-    _tf_sec = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
-    _sec = _tf_sec.get(_bt_tf, 300)
-    # 估算需要的K线数量: 每天约48根5分钟K线
-    _bars_per_day = max(1, int(86400 / _sec * 0.5))  # 约一半是交易时间
-    _total_bars = min(_bt_days * _bars_per_day, 8900)
+    if st.button("运行回测", type="primary", key="bt_run") and _bt_sel:
+        _bt_idx = _bt_labels.index(_bt_sel)
+        _bt_inst = _bt_insts[_bt_idx]
+        _bt_sym = _to_tq_symbol(_bt_inst["instrument_id"], _bt_inst["exchange"])
+        _bt_iid = _bt_inst["instrument_id"]
+        _bt_ex = _bt_inst["exchange"]
+        _bt_size = _bt_inst.get("size", 10)
 
-    with st.spinner(f"从天勤获取 {_bt_sym} 历史数据 ({_bt_days}天, {_bt_tf})..."):
-        api, err = _get_tq_api()
-        if err:
-            st.error(f"天勤连接失败: {err}")
-        else:
-            try:
-                import math as _math
-                _bt_klines = api.get_kline_serial(_bt_sym, _sec, data_length=_total_bars)
-                api.wait_update(deadline=time.time() + 20)
+        _tf_sec = {"5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
+        _sec = _tf_sec.get(_bt_tf, 300)
+        # 估算需要的K线数量: 每天约48根5分钟K线
+        _bars_per_day = max(1, int(86400 / _sec * 0.5))  # 约一半是交易时间
+        _total_bars = min(_bt_days * _bars_per_day, 8900)
 
-                # 转为列表格式
-                _bt_candles = []
-                for _, row in _bt_klines.iterrows():
-                    o = float(row.get("open", 0)) if not _math.isnan(float(row.get("open", 0))) else 0
-                    h = float(row.get("high", 0)) if not _math.isnan(float(row.get("high", 0))) else 0
-                    l = float(row.get("low", 0)) if not _math.isnan(float(row.get("low", 0))) else 0
-                    c = float(row.get("close", 0)) if not _math.isnan(float(row.get("close", 0))) else 0
-                    v = float(row.get("volume", 0)) if not _math.isnan(float(row.get("volume", 0))) else 0
-                    if o <= 0 or v <= 0:
-                        continue
-                    t_raw = row.get("datetime", 0)
-                    if isinstance(t_raw, (int, float)) and not _math.isnan(t_raw) and t_raw > 0:
-                        ts = t_raw / 1e9 if t_raw > 1e15 else t_raw
-                        t_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
-                    else:
-                        t_str = str(t_raw)
-                    _bt_candles.append({"time": t_str, "open": o, "high": h, "low": l, "close": c, "volume": int(v)})
+        with st.spinner(f"从天勤获取 {_bt_sym} 历史数据 ({_bt_days}天, {_bt_tf})..."):
+            api, err = _get_tq_api()
+            if err:
+                st.error(f"天勤连接失败: {err}")
+            else:
+                try:
+                    import math as _math
+                    _bt_klines = api.get_kline_serial(_bt_sym, _sec, data_length=_total_bars)
+                    api.wait_update(deadline=time.time() + 20)
 
-                st.caption(f"获取到 {len(_bt_candles)} 根K线")
-
-                if len(_bt_candles) < 30:
-                    st.warning("K线数据不足，无法回测 (至少需要30根)")
-                else:
-                    # === 回测引擎 ===
-                    _bt_trades = []
-                    _bt_equity = [0.0]  # 累计盈亏
-                    _bt_position = None  # {"dir": "buy"/"sell", "entry": price, "time": str, "sl": price, "tp": price}
-                    _bt_lookback = 20  # 信号计算窗口
-
-                    for i in range(_bt_lookback, len(_bt_candles)):
-                        window = _bt_candles[i - _bt_lookback:i]
-                        cp = _bt_candles[i]["close"]
-                        ct = _bt_candles[i]["time"]
-
-                        # 1) 检查止损止盈
-                        if _bt_position:
-                            pos_dir = _bt_position["dir"]
-                            pos_entry = _bt_position["entry"]
-                            pos_sl = _bt_position["sl"]
-                            pos_tp = _bt_position["tp"]
-                            hit_sl = (pos_dir == "buy" and cp <= pos_sl) or (pos_dir == "sell" and cp >= pos_sl)
-                            hit_tp = (pos_dir == "buy" and cp >= pos_tp) or (pos_dir == "sell" and cp <= pos_tp)
-
-                            if hit_sl or hit_tp:
-                                exit_price = pos_sl if hit_sl else pos_tp
-                                pnl = (exit_price - pos_entry) * _bt_vol * _bt_size if pos_dir == "buy" else (pos_entry - exit_price) * _bt_vol * _bt_size
-                                _bt_trades.append({
-                                    "entry_time": _bt_position["time"], "exit_time": ct,
-                                    "dir": pos_dir, "entry": pos_entry, "exit": exit_price,
-                                    "pnl": round(pnl, 0), "reason": "止损" if hit_sl else "止盈",
-                                    "vol": _bt_vol
-                                })
-                                _bt_equity.append(_bt_equity[-1] + pnl)
-                                _bt_position = None
-                                continue
-
-                        # 2) 计算信号
-                        ds = calc_delta(window)
-                        if len(ds) < 5:
-                            _bt_equity.append(_bt_equity[-1])
+                    # 转为列表格式
+                    _bt_candles = []
+                    for _, row in _bt_klines.iterrows():
+                        o = float(row.get("open", 0)) if not _math.isnan(float(row.get("open", 0))) else 0
+                        h = float(row.get("high", 0)) if not _math.isnan(float(row.get("high", 0))) else 0
+                        l = float(row.get("low", 0)) if not _math.isnan(float(row.get("low", 0))) else 0
+                        c = float(row.get("close", 0)) if not _math.isnan(float(row.get("close", 0))) else 0
+                        v = float(row.get("volume", 0)) if not _math.isnan(float(row.get("volume", 0))) else 0
+                        if o <= 0 or v <= 0:
                             continue
-                        prof = calc_volume_profile(window)
-                        lv = find_key_levels(prof, cp)
-                        of_val = max(-100, min(100, sum(dd["delta"] for dd in ds[-5:]) / max(len(ds[-5:]), 1) * 2))
-                        vpo = analyze_vpo(window)
-                        vs = vpo["score"]
-                        kl = 0
-                        if lv["support"] and abs(cp - lv["support"]["price"]) / cp * 100 < 0.5:
-                            kl = 40
-                        if lv["resistance"] and abs(cp - lv["resistance"]["price"]) / cp * 100 < 0.5:
-                            kl = -40
-                        mom = analyze_momentum(ds)
-                        ms = mom["score"]
-                        total = max(-100, min(100, of_val * 0.3 + vs * 0.25 + kl * 0.2 + ms * 0.25))
+                        t_raw = row.get("datetime", 0)
+                        if isinstance(t_raw, (int, float)) and not _math.isnan(t_raw) and t_raw > 0:
+                            ts = t_raw / 1e9 if t_raw > 1e15 else t_raw
+                            t_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                        else:
+                            t_str = str(t_raw)
+                        _bt_candles.append({"time": t_str, "open": o, "high": h, "low": l, "close": c, "volume": int(v)})
 
-                        # 3) 开仓逻辑
-                        if _bt_position is None and abs(total) >= _bt_threshold:
-                            direction = "buy" if total > 0 else "sell"
-                            sl_price = round(cp * (1 - _bt_sl / 100), 1) if direction == "buy" else round(cp * (1 + _bt_sl / 100), 1)
-                            tp_price = round(cp * (1 + _bt_tp / 100), 1) if direction == "buy" else round(cp * (1 - _bt_tp / 100), 1)
-                            _bt_position = {"dir": direction, "entry": cp, "time": ct, "sl": sl_price, "tp": tp_price, "signal": total}
-                        elif _bt_position and ((total > 0 and _bt_position["dir"] == "sell") or (total < 0 and _bt_position["dir"] == "buy")):
-                            # 反转信号平仓
-                            if abs(total) >= _bt_threshold * 0.6:
-                                pnl = (cp - _bt_position["entry"]) * _bt_vol * _bt_size if _bt_position["dir"] == "buy" else (_bt_position["entry"] - cp) * _bt_vol * _bt_size
-                                _bt_trades.append({
-                                    "entry_time": _bt_position["time"], "exit_time": ct,
-                                    "dir": _bt_position["dir"], "entry": _bt_position["entry"], "exit": cp,
-                                    "pnl": round(pnl, 0), "reason": "反转平仓",
-                                    "vol": _bt_vol
-                                })
-                                _bt_equity.append(_bt_equity[-1] + pnl)
-                                _bt_position = None
+                    st.caption(f"获取到 {len(_bt_candles)} 根K线")
 
-                        _bt_equity.append(_bt_equity[-1])
+                    if len(_bt_candles) < 30:
+                        st.warning("K线数据不足，无法回测 (至少需要30根)")
+                    else:
+                        # === 回测引擎 ===
+                        _bt_trades = []
+                        _bt_equity = [0.0]  # 累计盈亏
+                        _bt_position = None  # {"dir": "buy"/"sell", "entry": price, "time": str, "sl": price, "tp": price}
+                        _bt_lookback = 20  # 信号计算窗口
 
-                    # 强制平仓未了结头寸
-                    if _bt_position:
-                        cp = _bt_candles[-1]["close"]
-                        pnl = (cp - _bt_position["entry"]) * _bt_vol * _bt_size if _bt_position["dir"] == "buy" else (_bt_position["entry"] - cp) * _bt_vol * _bt_size
-                        _bt_trades.append({
-                            "entry_time": _bt_position["time"], "exit_time": _bt_candles[-1]["time"],
-                            "dir": _bt_position["dir"], "entry": _bt_position["entry"], "exit": cp,
-                            "pnl": round(pnl, 0), "reason": "回测结束平仓",
-                            "vol": _bt_vol
-                        })
-                        _bt_equity.append(_bt_equity[-1] + pnl)
+                        for i in range(_bt_lookback, len(_bt_candles)):
+                            window = _bt_candles[i - _bt_lookback:i]
+                            cp = _bt_candles[i]["close"]
+                            ct = _bt_candles[i]["time"]
 
-                    # === 统计 ===
-                    total_pnl = _bt_equity[-1] if _bt_equity else 0
-                    n_trades = len(_bt_trades)
-                    wins = [t for t in _bt_trades if t["pnl"] > 0]
-                    losses = [t for t in _bt_trades if t["pnl"] <= 0]
-                    win_rate = len(wins) / n_trades * 100 if n_trades > 0 else 0
-                    max_dd = 0
-                    peak = 0
-                    for eq in _bt_equity:
-                        if eq > peak:
-                            peak = eq
-                        dd = peak - eq
-                        if dd > max_dd:
-                            max_dd = dd
-                    avg_win = sum(t["pnl"] for t in wins) / len(wins) if wins else 0
-                    avg_loss = sum(t["pnl"] for t in losses) / len(losses) if losses else 0
-                    profit_factor = abs(sum(t["pnl"] for t in wins) / sum(t["pnl"] for t in losses)) if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
+                            # 1) 检查止损止盈
+                            if _bt_position:
+                                pos_dir = _bt_position["dir"]
+                                pos_entry = _bt_position["entry"]
+                                pos_sl = _bt_position["sl"]
+                                pos_tp = _bt_position["tp"]
+                                hit_sl = (pos_dir == "buy" and cp <= pos_sl) or (pos_dir == "sell" and cp >= pos_sl)
+                                hit_tp = (pos_dir == "buy" and cp >= pos_tp) or (pos_dir == "sell" and cp <= pos_tp)
 
-                    # 显示结果
-                    st.markdown("---")
-                    st.markdown(f"**回测结果: {_bt_inst['label']} | {_bt_tf} | {_bt_days}天 | {n_trades}笔交易**")
+                                if hit_sl or hit_tp:
+                                    exit_price = pos_sl if hit_sl else pos_tp
+                                    pnl = (exit_price - pos_entry) * _bt_vol * _bt_size if pos_dir == "buy" else (pos_entry - exit_price) * _bt_vol * _bt_size
+                                    _bt_trades.append({
+                                        "entry_time": _bt_position["time"], "exit_time": ct,
+                                        "dir": pos_dir, "entry": pos_entry, "exit": exit_price,
+                                        "pnl": round(pnl, 0), "reason": "止损" if hit_sl else "止盈",
+                                        "vol": _bt_vol
+                                    })
+                                    _bt_equity.append(_bt_equity[-1] + pnl)
+                                    _bt_position = None
+                                    continue
 
-                    _r1, _r2, _r3, _r4, _r5 = st.columns(5)
-                    with _r1: st.metric("总盈亏", f"{total_pnl:+,.0f}", delta=f"{'盈' if total_pnl>0 else '亏'}")
-                    with _r2: st.metric("胜率", f"{win_rate:.1f}%")
-                    with _r3: st.metric("最大回撤", f"{max_dd:,.0f}")
-                    with _r4: st.metric("盈亏比", f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞")
-                    with _r5: st.metric("均盈/均亏", f"{avg_win:+,.0f}/{avg_loss:+,.0f}")
+                            # 2) 计算信号
+                            ds = calc_delta(window)
+                            if len(ds) < 5:
+                                _bt_equity.append(_bt_equity[-1])
+                                continue
+                            prof = calc_volume_profile(window)
+                            lv = find_key_levels(prof, cp)
+                            of_val = max(-100, min(100, sum(dd["delta"] for dd in ds[-5:]) / max(len(ds[-5:]), 1) * 2))
+                            vpo = analyze_vpo(window)
+                            vs = vpo["score"]
+                            kl = 0
+                            if lv["support"] and abs(cp - lv["support"]["price"]) / cp * 100 < 0.5:
+                                kl = 40
+                            if lv["resistance"] and abs(cp - lv["resistance"]["price"]) / cp * 100 < 0.5:
+                                kl = -40
+                            mom = analyze_momentum(ds)
+                            ms = mom["score"]
+                            total = max(-100, min(100, of_val * 0.3 + vs * 0.25 + kl * 0.2 + ms * 0.25))
 
-                    # 权益曲线
-                    st.markdown("**权益曲线**")
-                    eq_fig = go.Figure()
-                    eq_fig.add_trace(go.Scatter(y=_bt_equity, mode="lines", name="累计盈亏",
-                        line=dict(color="#22c55e" if total_pnl >= 0 else "#ef4444", width=2)))
-                    eq_fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                    eq_fig.update_layout(height=250, margin=dict(l=8,r=8,t=8,b=8), template="plotly_dark",
-                        xaxis_title="K线序号", yaxis_title="盈亏")
-                    st.plotly_chart(eq_fig, use_container_width=True)
+                            # 3) 开仓逻辑
+                            if _bt_position is None and abs(total) >= _bt_threshold:
+                                direction = "buy" if total > 0 else "sell"
+                                sl_price = round(cp * (1 - _bt_sl / 100), 1) if direction == "buy" else round(cp * (1 + _bt_sl / 100), 1)
+                                tp_price = round(cp * (1 + _bt_tp / 100), 1) if direction == "buy" else round(cp * (1 - _bt_tp / 100), 1)
+                                _bt_position = {"dir": direction, "entry": cp, "time": ct, "sl": sl_price, "tp": tp_price, "signal": total}
+                            elif _bt_position and ((total > 0 and _bt_position["dir"] == "sell") or (total < 0 and _bt_position["dir"] == "buy")):
+                                # 反转信号平仓
+                                if abs(total) >= _bt_threshold * 0.6:
+                                    pnl = (cp - _bt_position["entry"]) * _bt_vol * _bt_size if _bt_position["dir"] == "buy" else (_bt_position["entry"] - cp) * _bt_vol * _bt_size
+                                    _bt_trades.append({
+                                        "entry_time": _bt_position["time"], "exit_time": ct,
+                                        "dir": _bt_position["dir"], "entry": _bt_position["entry"], "exit": cp,
+                                        "pnl": round(pnl, 0), "reason": "反转平仓",
+                                        "vol": _bt_vol
+                                    })
+                                    _bt_equity.append(_bt_equity[-1] + pnl)
+                                    _bt_position = None
 
-                    # 交易明细
-                    if _bt_trades:
-                        st.markdown("**交易明细**")
-                        _trade_rows = []
-                        for t in _bt_trades:
-                            _trade_rows.append({
-                                "开仓时间": t["entry_time"], "平仓时间": t["exit_time"],
-                                "方向": "做多" if t["dir"] == "buy" else "做空",
-                                "开仓价": f"{t['entry']:.0f}", "平仓价": f"{t['exit']:.0f}",
-                                "手数": t["vol"], "盈亏": f"{t['pnl']:+,.0f}",
-                                "原因": t["reason"]
+                            _bt_equity.append(_bt_equity[-1])
+
+                        # 强制平仓未了结头寸
+                        if _bt_position:
+                            cp = _bt_candles[-1]["close"]
+                            pnl = (cp - _bt_position["entry"]) * _bt_vol * _bt_size if _bt_position["dir"] == "buy" else (_bt_position["entry"] - cp) * _bt_vol * _bt_size
+                            _bt_trades.append({
+                                "entry_time": _bt_position["time"], "exit_time": _bt_candles[-1]["time"],
+                                "dir": _bt_position["dir"], "entry": _bt_position["entry"], "exit": cp,
+                                "pnl": round(pnl, 0), "reason": "回测结束平仓",
+                                "vol": _bt_vol
                             })
-                        st.dataframe(pd.DataFrame(_trade_rows), use_container_width=True, hide_index=True)
+                            _bt_equity.append(_bt_equity[-1] + pnl)
 
-            except Exception as e:
-                st.error(f"回测出错: {e}")
-                import traceback
-                st.code(traceback.format_exc())
+                        # === 统计 ===
+                        total_pnl = _bt_equity[-1] if _bt_equity else 0
+                        n_trades = len(_bt_trades)
+                        wins = [t for t in _bt_trades if t["pnl"] > 0]
+                        losses = [t for t in _bt_trades if t["pnl"] <= 0]
+                        win_rate = len(wins) / n_trades * 100 if n_trades > 0 else 0
+                        max_dd = 0
+                        peak = 0
+                        for eq in _bt_equity:
+                            if eq > peak:
+                                peak = eq
+                            dd = peak - eq
+                            if dd > max_dd:
+                                max_dd = dd
+                        avg_win = sum(t["pnl"] for t in wins) / len(wins) if wins else 0
+                        avg_loss = sum(t["pnl"] for t in losses) / len(losses) if losses else 0
+                        profit_factor = abs(sum(t["pnl"] for t in wins) / sum(t["pnl"] for t in losses)) if losses and sum(t["pnl"] for t in losses) != 0 else float("inf")
+
+                        # 显示结果
+                        st.markdown("---")
+                        st.markdown(f"**回测结果: {_bt_inst['label']} | {_bt_tf} | {_bt_days}天 | {n_trades}笔交易**")
+
+                        _r1, _r2, _r3, _r4, _r5 = st.columns(5)
+                        with _r1: st.metric("总盈亏", f"{total_pnl:+,.0f}", delta=f"{'盈' if total_pnl>0 else '亏'}")
+                        with _r2: st.metric("胜率", f"{win_rate:.1f}%")
+                        with _r3: st.metric("最大回撤", f"{max_dd:,.0f}")
+                        with _r4: st.metric("盈亏比", f"{profit_factor:.2f}" if profit_factor != float("inf") else "∞")
+                        with _r5: st.metric("均盈/均亏", f"{avg_win:+,.0f}/{avg_loss:+,.0f}")
+
+                        # 权益曲线
+                        st.markdown("**权益曲线**")
+                        eq_fig = go.Figure()
+                        eq_fig.add_trace(go.Scatter(y=_bt_equity, mode="lines", name="累计盈亏",
+                            line=dict(color="#22c55e" if total_pnl >= 0 else "#ef4444", width=2)))
+                        eq_fig.add_hline(y=0, line_dash="dash", line_color="gray")
+                        eq_fig.update_layout(height=250, margin=dict(l=8,r=8,t=8,b=8), template="plotly_dark",
+                            xaxis_title="K线序号", yaxis_title="盈亏")
+                        st.plotly_chart(eq_fig, use_container_width=True)
+
+                        # 交易明细
+                        if _bt_trades:
+                            st.markdown("**交易明细**")
+                            _trade_rows = []
+                            for t in _bt_trades:
+                                _trade_rows.append({
+                                    "开仓时间": t["entry_time"], "平仓时间": t["exit_time"],
+                                    "方向": "做多" if t["dir"] == "buy" else "做空",
+                                    "开仓价": f"{t['entry']:.0f}", "平仓价": f"{t['exit']:.0f}",
+                                    "手数": t["vol"], "盈亏": f"{t['pnl']:+,.0f}",
+                                    "原因": t["reason"]
+                                })
+                            st.dataframe(pd.DataFrame(_trade_rows), use_container_width=True, hide_index=True)
+
+                except Exception as e:
+                    st.error(f"回测出错: {e}")
+                    import traceback
+                    st.code(traceback.format_exc())
 
 
 
