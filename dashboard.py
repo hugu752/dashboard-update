@@ -148,10 +148,15 @@ _atexit.register(_cleanup_tq)
 
 def _get_tq_api():
     """获取或创建天勤API实例 (缓存在session_state中)"""
-    try:
-        from tqsdk import TqApi, TqAuth
-    except ImportError:
-        return None, "tqsdk 未安装, 请运行: pip install tqsdk"
+    # 缓存 tqsdk 导入 (约10秒, 避免每次rerun重新导入)
+    if "_tq_module" not in st.session_state:
+        try:
+            from tqsdk import TqApi, TqAuth
+            st.session_state._tq_module = {"TqApi": TqApi, "TqAuth": TqAuth}
+        except ImportError:
+            return None, "tqsdk 未安装, 请运行: pip install tqsdk"
+    TqApi = st.session_state._tq_module["TqApi"]
+    TqAuth = st.session_state._tq_module["TqAuth"]
 
     if "_tq_api" in st.session_state and st.session_state._tq_api is not None:
         api = st.session_state._tq_api
@@ -195,11 +200,11 @@ def _get_tq_api():
 
     t = threading.Thread(target=_create_api, daemon=True)
     t.start()
-    t.join(timeout=40)  # 天勤连接通常需要18-30秒
+    t.join(timeout=60)  # 天勤连接+订阅通常需要20-40秒
 
     if t.is_alive():
         # 超时了, 线程还在跑但无法终止
-        return None, "天勤连接超时(40秒), 请检查网络后重试"
+        return None, "天勤连接超时(60秒), 请检查网络后重试"
 
     if _result["err"]:
         err = str(_result["err"])
@@ -264,6 +269,7 @@ def fetch_data_from_tq(instruments):
 
         # 提取数据
         data = {}
+        has_any_price = False
         for inst in instruments:
             iid = inst["instrument_id"]
             sub = tq_subs.get(iid)
@@ -279,9 +285,13 @@ def fetch_data_from_tq(instruments):
                     return 0 if _math.isnan(fv) else fv
                 except: return 0
 
+            lp = _safe(q.last_price)
+            if lp > 0:
+                has_any_price = True
+
             tick = {
                 "instrument_id": iid,
-                "last_price": _safe(q.last_price),
+                "last_price": lp,
                 "open": _safe(q.open),
                 "high": _safe(q.highest),
                 "low": _safe(q.lowest),
@@ -336,7 +346,15 @@ def fetch_data_from_tq(instruments):
                 "candles_1d": _klines_to_list(sub["k1d"]),
             }
 
-        return data if data else None
+        if not data:
+            print(f"[TQ] No data extracted for {len(instruments)} instruments")
+            return None
+
+        # 即使没有实时价格, 也返回数据 (K线历史数据仍然有用)
+        if not has_any_price:
+            print(f"[TQ] Connected but no live prices (non-trading hours?). Returning data with K-lines.")
+
+        return data
 
     except Exception as e:
         print(f"[TQ] fetch_data_from_tq error: {e}")
@@ -1609,7 +1627,9 @@ if st.session_state.connected and st.session_state.instruments:
 elif st.session_state.instruments:
     # MCP 未连接: 使用天勤数据
     if _tq_ready:
-        with st.spinner("获取数据中 (天勤)..."):
+        _has_cached_api = "_tq_api" in st.session_state and st.session_state._tq_api is not None
+        _spinner_msg = "获取数据中 (天勤)..." if _has_cached_api else "首次连接天勤量化中 (约30-40秒，请耐心等待)..."
+        with st.spinner(_spinner_msg):
             _tq_data = fetch_data_from_tq(st.session_state.instruments)
             if _tq_data:
                 st.session_state.data = _tq_data
@@ -1623,7 +1643,11 @@ elif st.session_state.instruments:
                 elif _err:
                     st.warning(f"天勤: {_err}")
                 else:
-                    st.warning("天勤数据获取失败，请检查网络")
+                    # API正常但数据为空 - 可能是合约代码不对或非交易时间
+                    if not st.session_state.instruments:
+                        st.warning("请先添加监控品种")
+                    else:
+                        st.warning("天勤数据为空，可能原因：合约代码不正确、非交易时间、或网络延迟")
     else:
         st.session_state.data = {}
 
