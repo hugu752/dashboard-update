@@ -199,7 +199,7 @@ def _get_tq_api():
 
     if t.is_alive():
         # 超时了, 线程还在跑但无法终止
-        return None, "天勤连接超时(20秒), 请检查网络后重试"
+        return None, "天勤连接超时(40秒), 请检查网络后重试"
 
     if _result["err"]:
         err = str(_result["err"])
@@ -322,7 +322,7 @@ def fetch_data_from_tq(instruments):
                             "time": time_str,
                             "open": o, "high": h, "low": l, "close": c,
                             "volume": int(_safe(row.get("volume", 0))),
-                            "open_interest": int(_safe(row.get("close_oi", 0))),
+                            "open_interest": int(_safe(row.get("open_interest", 0))),
                         })
                 except Exception:
                     pass
