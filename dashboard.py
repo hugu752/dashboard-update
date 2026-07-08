@@ -42,14 +42,11 @@ STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard
 # ============================================================================
 
 def _to_tq_symbol(instrument_id, exchange):
-    """将 exchange + instrument_id 转为天勤代码, 如 CZCE.FG2609"""
-    iid = instrument_id
-    if exchange == "CZCE":
-        import re as _re
-        m = _re.match(r"^([A-Za-z]+)(\d{3})$", iid)
-        if m:
-            iid = f"{m.group(1)}2{m.group(2)}"
-    return f"{exchange}.{iid}"
+    """将 exchange + instrument_id 转为天勤代码
+    CZCE 用3位: CZCE.FG609 (天勤原生格式, 不需要补全)
+    SHFE/DCE/CFFEX 用4位: SHFE.rb2609
+    """
+    return f"{exchange}.{instrument_id}"
 
 # 交易所夜盘时间段 (开始小时, 结束小时) - 用于判断交易时间
 # 日盘: 9:00-11:30, 13:30-15:00
@@ -230,23 +227,34 @@ def _get_tq_subscriptions(api, instruments):
         needed_iids = {inst["instrument_id"] for inst in instruments}
         if needed_iids <= cached_iids:
             return subs
+        # 部分匹配, 清除旧缓存重新订阅
+        st.session_state._tq_subs = None
 
     # 需要新建订阅
     subs = {}
+    failed = []
     for inst in instruments:
         iid = inst["instrument_id"]
         ex = inst["exchange"]
         sym = _to_tq_symbol(iid, ex)
-        subs[iid] = {
-            "sym": sym,
-            "quote": api.get_quote(sym),
-            "k1m": api.get_kline_serial(sym, 60, data_length=120),
-            "k5m": api.get_kline_serial(sym, 300, data_length=60),
-            "k1d": api.get_kline_serial(sym, 86400, data_length=30),
-        }
+        try:
+            subs[iid] = {
+                "sym": sym,
+                "quote": api.get_quote(sym),
+                "k1m": api.get_kline_serial(sym, 60, data_length=120),
+                "k5m": api.get_kline_serial(sym, 300, data_length=60),
+                "k1d": api.get_kline_serial(sym, 86400, data_length=30),
+            }
+        except Exception as e:
+            print(f"[TQ] 订阅 {sym} 失败: {e}")
+            failed.append(sym)
+
+    if failed:
+        print(f"[TQ] 以下合约订阅失败: {failed}")
 
     # 首次订阅后等待数据到达
-    api.wait_update(deadline=time.time() + 15)
+    if subs:
+        api.wait_update(deadline=time.time() + 15)
     st.session_state._tq_subs = subs
     return subs
 
