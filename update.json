@@ -1,1 +1,6 @@
-{"version": "202607081834", "description": "Fix auto trading trigger - TQ data + MCP orders", "url": "https://raw.githubusercontent.com/hugu752/dashboard-update/main/dashboard.py"}
+{
+  "version": "1.0.1",
+  "download_url": "https://raw.githubusercontent.com/hugu752/dashboard-update/main/dashboard.py",
+  "changelog": "版本 1.0.1 - 2026-07-08",
+  "update_time": "2026-07-08 18:42:33"
+}
