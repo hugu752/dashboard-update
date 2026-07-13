@@ -1218,14 +1218,29 @@ def execute_auto_trades():
             continue
 
         # 先处理平仓信号（反转）
+        closed_something = False
         if short_vol > 0 and score >= reversal:
             _add_trade_log("反转", iid, "sell", reason=f"评分{score:.0f}>=反转{reversal},平空仓")
             close_position(iid, ex, "sell", short_vol, reason="反转平仓")
-            has_position = False
+            closed_something = True
         elif long_vol > 0 and score <= -reversal:
             _add_trade_log("反转", iid, "buy", reason=f"评分{score:.0f}<=-{reversal},平多仓")
             close_position(iid, ex, "buy", long_vol, reason="反转平仓")
-            has_position = False
+            closed_something = True
+
+        # 平仓后重新查询实际持仓，确保两边都平了才开新仓
+        if closed_something:
+            time.sleep(1)  # 等平仓成交
+            try:
+                hr2 = _mcp_trade_call("fetch_holding", {"instrument_id": iid})
+                if hr2.get("success"):
+                    hd2 = hr2.get("result", {})
+                    if isinstance(hd2, dict):
+                        long_vol2 = (hd2.get("long") or {}).get("position", 0)
+                        short_vol2 = (hd2.get("short") or {}).get("position", 0)
+                        has_position = (long_vol2 > 0 or short_vol2 > 0)
+            except:
+                has_position = True  # 查询失败就保守不开
 
         # 有持仓就不开新仓
         if has_position:
