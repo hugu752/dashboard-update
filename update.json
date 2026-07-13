@@ -1,9 +1,9 @@
 {
-  "version": "2.0.1",
+  "version": "2.0.2",
   "files": {
     "server.py": "https://raw.githubusercontent.com/hugu752/dashboard-update/main/server.py",
     "index.html": "https://raw.githubusercontent.com/hugu752/dashboard-update/main/index.html"
   },
-  "changelog": "版本 2.0.1 - 2026-07-13",
-  "update_time": "2026-07-13 12:00:00"
+  "changelog": "版本 2.0.2 - 修复多空同时开仓问题",
+  "update_time": "2026-07-13 14:00:00"
 }
