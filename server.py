@@ -1161,17 +1161,17 @@ def set_take_profit(instrument_id, exchange, direction, price):
 # ============================================================================
 
 def execute_auto_trades():
-    """检查信号并自动执行交易 — 用fetch_holding逐个查持仓，有仓位就不开"""
+    """检查信号并自动执行交易 — v3多周期确认+ATR动态止损版"""
     global _trade_cooldown
     if not state.auto_trading or not state.data or not state.instruments:
         return
 
     now_ts = time.time()
-    cooldown_sec = 120
+    cooldown_sec = 180  # 同品种开仓冷却3分钟
 
     for inst in state.instruments:
         iid = inst["instrument_id"]
-        ex = inst["exchange"]
+        ex = inst.get("exchange", "")
         d = state.data.get(iid, {})
         tick = d.get("tick", {})
         if not isinstance(tick, dict) or not tick:
@@ -1186,94 +1186,149 @@ def execute_auto_trades():
         if cp <= 0:
             continue
 
+        atr = analysis.get("atr", 0)
+        atr_pct = analysis.get("atr_pct", 0)
+        htf_trend = analysis.get("htf_trend", {})
+        htf_dir = htf_trend.get("direction", 0)
+        htf_str = htf_trend.get("strength", 0)
+
         ic = get_inst_config(iid)
         threshold = ic["threshold"]
         reversal = ic["reversal"]
 
-        # ---- 核心：逐个查实际持仓 ----
-        has_position = False
+        # ---- 查询实际持仓 ----
         long_vol = 0
         short_vol = 0
+        query_ok = False
         try:
             hr = _mcp_trade_call("fetch_holding", {"instrument_id": iid})
             if hr.get("success"):
+                query_ok = True
                 hd = hr.get("result", {})
                 if isinstance(hd, dict):
-                    net = hd.get("net_position", 0)
-                    total = hd.get("position", 0)
-                    if total > 0 or net != 0:
-                        has_position = True
-                        long_info = hd.get("long") or {}
-                        short_info = hd.get("short") or {}
-                        if isinstance(long_info, dict):
-                            long_vol = long_info.get("position", 0)
-                        if isinstance(short_info, dict):
-                            short_vol = short_info.get("position", 0)
+                    long_info = hd.get("long") or {}
+                    short_info = hd.get("short") or {}
+                    if isinstance(long_info, dict):
+                        long_vol = long_info.get("volume_today", 0) + long_info.get("volume_his", 0)
+                    if isinstance(short_info, dict):
+                        short_vol = short_info.get("volume_today", 0) + short_info.get("volume_his", 0)
             else:
-                # MCP查询失败，跳过这个品种，不开仓
                 print(f"[AutoTrade] {iid} fetch_holding failed: {hr.get('error')}")
                 continue
         except Exception as e:
             print(f"[AutoTrade] {iid} holding check error: {e}")
             continue
 
-        # 先处理平仓信号（反转）
-        closed_something = False
-        if short_vol > 0 and score >= reversal:
-            _add_trade_log("反转", iid, "sell", reason=f"评分{score:.0f}>=反转{reversal},平空仓")
-            close_position(iid, ex, "sell", short_vol, reason="反转平仓")
-            closed_something = True
-        elif long_vol > 0 and score <= -reversal:
-            _add_trade_log("反转", iid, "buy", reason=f"评分{score:.0f}<=-{reversal},平多仓")
-            close_position(iid, ex, "buy", long_vol, reason="反转平仓")
-            closed_something = True
-
-        # 平仓后重新查询实际持仓，确保两边都平了才开新仓
-        if closed_something:
-            time.sleep(1)  # 等平仓成交
-            try:
-                hr2 = _mcp_trade_call("fetch_holding", {"instrument_id": iid})
-                if hr2.get("success"):
-                    hd2 = hr2.get("result", {})
-                    if isinstance(hd2, dict):
-                        long_vol2 = (hd2.get("long") or {}).get("position", 0)
-                        short_vol2 = (hd2.get("short") or {}).get("position", 0)
-                        has_position = (long_vol2 > 0 or short_vol2 > 0)
-            except:
-                has_position = True  # 查询失败就保守不开
-
-        # 有持仓就不开新仓
-        if has_position:
+        if not query_ok:
             continue
 
-        # 开仓信号
-        if score >= threshold:
-            cd_key = (iid, "buy")
-            if now_ts - _trade_cooldown.get(cd_key, 0) < cooldown_sec:
+        total_vol = long_vol + short_vol
+
+        # ---- 第一步：平仓（两边都检查，不用elif） ----
+        did_close = False
+
+        if short_vol > 0 and score >= reversal:
+            _add_trade_log("反转", iid, "sell", reason=f"评分{score:.0f}>=反转{reversal},平空{short_vol}手")
+            close_position(iid, ex, "sell", short_vol, reason="反转平空")
+            did_close = True
+            print(f"[AutoTrade] {iid} 平空 {short_vol}手 (score={score:.0f})")
+
+        if long_vol > 0 and score <= -reversal:
+            _add_trade_log("反转", iid, "buy", reason=f"评分{score:.0f}<=-{reversal},平多{long_vol}手")
+            close_position(iid, ex, "buy", long_vol, reason="反转平多")
+            did_close = True
+            print(f"[AutoTrade] {iid} 平多 {long_vol}手 (score={score:.0f})")
+
+        # ---- 第二步：本循环平过仓就不开新仓 ----
+        if did_close:
+            print(f"[AutoTrade] {iid} 已平仓，本轮不开新仓")
+            continue
+
+        # ---- 第三步：有持仓就不开新仓 ----
+        if total_vol > 0:
+            continue
+
+        # ---- 第四步：开仓前过滤 ----
+        cd_key = iid
+        if now_ts - _trade_cooldown.get(cd_key, 0) < cooldown_sec:
+            continue
+
+        # 过滤1: 波动率过滤 — ATR%太低(死水)或太高(恐慌)都不交易
+        if atr > 0 and cp > 0:
+            if atr_pct < 0.03:
+                print(f"[AutoTrade] {iid} 跳过: 波动率过低 ATR%={atr_pct:.3f}%")
                 continue
-            _add_trade_log("信号", iid, "buy", reason=f"评分{score:.0f}>=阈值{threshold}")
+            if atr_pct > 3.0:
+                print(f"[AutoTrade] {iid} 跳过: 波动率过高 ATR%={atr_pct:.3f}%")
+                continue
+
+        # 过滤2: 多周期确认 — 逆强趋势不开仓
+        if score > 0 and htf_dir == -1 and htf_str >= 60:
+            print(f"[AutoTrade] {iid} 跳过: 逆高周期空头(强度{htf_str:.0f})做多")
+            continue
+        if score < 0 and htf_dir == 1 and htf_str >= 60:
+            print(f"[AutoTrade] {iid} 跳过: 逆高周期多头(强度{htf_str:.0f})做空")
+            continue
+
+        # 过滤3: Delta方向确认 — 最近3根K线至少2根Delta与信号同向
+        ds = analysis.get("delta", [])
+        if len(ds) >= 3:
+            recent_deltas = [dd["delta"] for dd in ds[-3:]]
+            if score > 0:
+                pos_count = sum(1 for d in recent_deltas if d > 0)
+                if pos_count < 2:
+                    print(f"[AutoTrade] {iid} 跳过: Delta确认不足(多{pos_count}/3)")
+                    continue
+            elif score < 0:
+                neg_count = sum(1 for d in recent_deltas if d < 0)
+                if neg_count < 2:
+                    print(f"[AutoTrade] {iid} 跳过: Delta确认不足(空{neg_count}/3)")
+                    continue
+
+        # ---- 第五步：ATR动态止损开仓 ----
+        # ATR止损倍数: 2倍ATR，最低不低于固定百分比止损
+        atr_sl_multiplier = 2.0
+        fixed_sl_pct = ic["sl_pct"] / 100
+
+        if score >= threshold:
+            # ATR动态止损
+            atr_sl_dist = atr * atr_sl_multiplier if atr > 0 else cp * fixed_sl_pct
+            fixed_sl_dist = cp * fixed_sl_pct
+            sl_dist = max(atr_sl_dist, fixed_sl_dist)  # 取较大值，保安全
+            sl = round(cp - sl_dist, 2)
+            # ATR动态止盈: 至少3倍ATR或固定止盈
+            atr_tp_dist = atr * 3.0 if atr > 0 else cp * ic["tp_pct"] / 100
+            fixed_tp_dist = cp * ic["tp_pct"] / 100
+            tp_dist = max(atr_tp_dist, fixed_tp_dist)
+            tp = round(cp + tp_dist, 2)
+
+            _add_trade_log("信号", iid, "buy", reason=f"评分{score:.0f}>=阈值{threshold},ATR={atr:.1f},开多")
             result = submit_trade(iid, ex, "buy", ic["trade_volume"], cp)
             if result.get("success"):
                 _trade_cooldown[cd_key] = now_ts
-                sl = round(cp * (1 - ic["sl_pct"] / 100), 2)
-                tp = round(cp * (1 + ic["tp_pct"] / 100), 2)
                 set_stop_loss(iid, ex, "buy", sl)
                 time.sleep(0.5)
                 set_take_profit(iid, ex, "buy", tp)
+                print(f"[AutoTrade] {iid} 开多 @ {cp}, SL={sl}({sl_dist/cp*100:.2f}%), TP={tp}({tp_dist/cp*100:.2f}%)")
 
         elif score <= -threshold:
-            cd_key = (iid, "sell")
-            if now_ts - _trade_cooldown.get(cd_key, 0) < cooldown_sec:
-                continue
-            _add_trade_log("信号", iid, "sell", reason=f"评分{score:.0f}<=-{threshold}")
+            atr_sl_dist = atr * atr_sl_multiplier if atr > 0 else cp * fixed_sl_pct
+            fixed_sl_dist = cp * fixed_sl_pct
+            sl_dist = max(atr_sl_dist, fixed_sl_dist)
+            sl = round(cp + sl_dist, 2)
+            atr_tp_dist = atr * 3.0 if atr > 0 else cp * ic["tp_pct"] / 100
+            fixed_tp_dist = cp * ic["tp_pct"] / 100
+            tp_dist = max(atr_tp_dist, fixed_tp_dist)
+            tp = round(cp - tp_dist, 2)
+
+            _add_trade_log("信号", iid, "sell", reason=f"评分{score:.0f}<=-{threshold},ATR={atr:.1f},开空")
             result = submit_trade(iid, ex, "sell", ic["trade_volume"], cp)
             if result.get("success"):
                 _trade_cooldown[cd_key] = now_ts
-                sl = round(cp * (1 + ic["sl_pct"] / 100), 2)
-                tp = round(cp * (1 - ic["tp_pct"] / 100), 2)
                 set_stop_loss(iid, ex, "sell", sl)
                 time.sleep(0.5)
                 set_take_profit(iid, ex, "sell", tp)
+                print(f"[AutoTrade] {iid} 开空 @ {cp}, SL={sl}({sl_dist/cp*100:.2f}%), TP={tp}({tp_dist/cp*100:.2f}%)")
 
 def _refresh_positions():
     """从MCP刷新持仓数据（同步）"""
@@ -1455,6 +1510,107 @@ def calc_delta(candles):
         deltas.append({"time": t, "delta": round(d, 1), "buy_vol": round(bv, 1),
                         "sell_vol": round(sv, 1), "volume": vol, "close": cl, "open": o})
     return deltas
+
+def calc_atr(candles, period=14):
+    """计算ATR(Average True Range)，用于动态止损和波动率过滤"""
+    if not candles or len(candles) < period + 1:
+        return 0
+    true_ranges = []
+    for i in range(1, len(candles)):
+        h = candles[i].get("high", 0)
+        l = candles[i].get("low", 0)
+        pc = candles[i-1].get("close", 0)
+        if h <= 0 or l <= 0 or pc <= 0:
+            continue
+        tr = max(h - l, abs(h - pc), abs(l - pc))
+        true_ranges.append(tr)
+    if len(true_ranges) < period:
+        return sum(true_ranges) / max(len(true_ranges), 1)
+    # 使用EMA平滑的ATR
+    atr = sum(true_ranges[:period]) / period
+    for tr in true_ranges[period:]:
+        atr = (atr * (period - 1) + tr) / period
+    return atr
+
+def get_higher_tf_trend(data, inst, current_tf="1m"):
+    """分析高周期趋势方向，用于多周期确认过滤
+    返回: {\"direction\": 1/-1/0, \"strength\": 0-100, \"trend_label\": str}
+    direction: 1=多头, -1=空头, 0=震荡
+    """
+    iid = inst["instrument_id"]
+    d = data.get(iid, {})
+
+    # 根据当前周期选择高周期
+    if current_tf == "1m":
+        htfs = ["candles_5m", "candles_15m"]
+    elif current_tf == "5m":
+        htfs = ["candles_15m", "candles_1d"]
+    else:
+        htfs = ["candles_1d"]
+
+    scores = []
+    for htf_key in htfs:
+        candles = d.get(htf_key, [])
+        if not candles or len(candles) < 10:
+            continue
+
+        # 用EMA交叉判断趋势: 短期EMA vs 长期EMA
+        closes = [c.get("close", 0) for c in candles if c.get("close", 0) > 0]
+        if len(closes) < 10:
+            continue
+
+        short_ema = closes[-1]
+        long_ema = closes[-1]
+        # 计算短期EMA(5)
+        k_s = 2.0 / (min(5, len(closes)) + 1)
+        ema_s = closes[0]
+        for c in closes[1:]:
+            ema_s = c * k_s + ema_s * (1 - k_s)
+        short_ema = ema_s
+
+        # 计算长期EMA(20)
+        k_l = 2.0 / (min(20, len(closes)) + 1)
+        ema_l = closes[0]
+        for c in closes[1:]:
+            ema_l = c * k_l + ema_l * (1 - k_l)
+        long_ema = ema_l
+
+        # 价格相对EMA位置
+        last_close = closes[-1]
+        ema_diff = (short_ema - long_ema) / max(long_ema, 1) * 100
+
+        # 近期K线方向
+        recent = candles[-5:]
+        up_count = sum(1 for c in recent if c.get("close", 0) > c.get("open", 0))
+
+        # 综合判断
+        if ema_diff > 0.05 and up_count >= 3:
+            scores.append(1)  # 强多头
+        elif ema_diff > 0.02 and up_count >= 3:
+            scores.append(0.5)  # 弱多头
+        elif ema_diff < -0.05 and up_count <= 2:
+            scores.append(-1)  # 强空头
+        elif ema_diff < -0.02 and up_count <= 2:
+            scores.append(-0.5)  # 弱空头
+        else:
+            scores.append(0)  # 震荡
+
+    if not scores:
+        return {"direction": 0, "strength": 0, "trend_label": "数据不足"}
+
+    avg = sum(scores) / len(scores)
+    strength = min(100, abs(avg) * 100)
+
+    if avg >= 0.5:
+        return {"direction": 1, "strength": round(strength, 1), "trend_label": "高周期多头"}
+    elif avg <= -0.5:
+        return {"direction": -1, "strength": round(strength, 1), "trend_label": "高周期空头"}
+    elif avg > 0:
+        return {"direction": 1, "strength": round(strength, 1), "trend_label": "高周期偏多"}
+    elif avg < 0:
+        return {"direction": -1, "strength": round(strength, 1), "trend_label": "高周期偏空"}
+    else:
+        return {"direction": 0, "strength": 0, "trend_label": "高周期震荡"}
 
 def calc_volume_profile(candles):
     p = {}
@@ -1929,7 +2085,7 @@ def load_kline_cache(instrument_id, timeframe, max_age_hours=24):
         return None
 
 def analyze_instrument(data, inst, timeframe="1m"):
-    """对单个品种做完整分析 - 改进版"""
+    """对单个品种做完整分析 - v3多周期确认版"""
     iid = inst["instrument_id"]
     d = data.get(iid, {})
     tf_map = {"1m": "candles_1m", "5m": "candles_5m", "15m": "candles_15m", "1d": "candles_1d"}
@@ -1945,7 +2101,6 @@ def analyze_instrument(data, inst, timeframe="1m"):
     if not candles or not tick or isinstance(tick, str):
         return None
 
-    # 获取tick_size
     tick_size = inst.get("price_tick", 1.0)
 
     ds = calc_delta(candles)
@@ -1955,10 +2110,17 @@ def analyze_instrument(data, inst, timeframe="1m"):
     vp_full = calc_vp(candles, tick_size)
     lv = find_key_levels(vp_full, cp)
     vpo = analyze_vpo(candles)
-    mom = analyze_momentum(candles)  # 现在用candles而非deltas
+    mom = analyze_momentum(candles)
     hs = analyze_holdings(iid)
 
-    # 综合评分: delta 25% + VPO 20% + 关键价位 15% + 动量 25% + 持仓 15%
+    # --- 新增: ATR计算 ---
+    atr = calc_atr(candles, period=14)
+    atr_pct = (atr / max(cp, 1)) * 100 if cp > 0 else 0
+
+    # --- 新增: 高周期趋势 ---
+    htf_trend = get_higher_tf_trend(data, inst, timeframe)
+
+    # 综合评分: OF 25% + VP 20% + KL 15% + MS 25% + HS 15%
     total_delta = sum(dd["delta"] for dd in ds[-5:])
     total_vol = sum(dd["volume"] for dd in ds[-5:])
     of_val = max(-100, min(100, total_delta / max(total_vol, 1) * 100))
@@ -1969,6 +2131,22 @@ def analyze_instrument(data, inst, timeframe="1m"):
 
     total = of_val * 0.25 + vs * 0.20 + kl * 0.15 + ms * 0.25 + hsc * 0.15
 
+    # --- 新增: 多周期确认加权/惩罚 ---
+    htf_dir = htf_trend.get("direction", 0)
+    htf_str = htf_trend.get("strength", 0)
+    if htf_dir == 1 and total > 0:
+        # 高周期多头 + 当前信号做多 → 加分
+        total *= 1.0 + htf_str * 0.001  # 最多加10%
+    elif htf_dir == -1 and total < 0:
+        # 高周期空头 + 当前信号做空 → 加分
+        total *= 1.0 + htf_str * 0.001
+    elif htf_dir == 1 and total < 0:
+        # 高周期多头但信号做空 → 惩罚(逆高周期)
+        total *= 0.85
+    elif htf_dir == -1 and total > 0:
+        # 高周期空头但信号做多 → 惩罚(逆高周期)
+        total *= 0.85
+
     # 信号确认: 方向一致性(软化)
     if len(ds) >= 3:
         recent_dirs = [1 if dd["delta"] > 0 else -1 for dd in ds[-3:]]
@@ -1977,13 +2155,13 @@ def analyze_instrument(data, inst, timeframe="1m"):
         elif recent_dirs[0] != recent_dirs[-1]:
             total *= 0.92  # 仅首尾不一致时轻微惩罚
 
-    # 背离惩罚: 动量和delta方向矛盾(软化)
+    # 背离惩罚: 动量和delta方向矛盾
     if of_val > 20 and ms < -20:
         total *= 0.88
     elif of_val < -20 and ms > 20:
         total *= 0.88
 
-    # 量价背离惩罚(软化)
+    # 量价背离惩罚
     if vpo.get("divergence") == "price_up_vol_down" and total > 20:
         total *= 0.82
     elif vpo.get("divergence") == "vol_up_price_flat" and abs(total) > 30:
@@ -2008,6 +2186,9 @@ def analyze_instrument(data, inst, timeframe="1m"):
         "hs": hsc,
         "total_score": round(total, 1),
         "macd": calc_macd(candles),
+        "atr": round(atr, 2),
+        "atr_pct": round(atr_pct, 3),
+        "htf_trend": htf_trend,
     }
 
 # ============================================================================
@@ -2239,7 +2420,7 @@ async def get_status():
         "start_time": state.start_time.isoformat() if state.start_time else None,
         "auto_trading": state.auto_trading,
         "instruments": state.instruments,
-        "version": "2.0.1",
+        "version": "2.1.0",
     }
 
 # ============================================================================
